@@ -1,0 +1,50 @@
+# Telegram Plugin Configuration
+# Token can also be set via environment variable:
+#   TELEGRAM_BOT_TOKEN
+
+bot:
+  token: ""          # BotFather token
+  username: ""       # Auto-filled on first connect
+
+defaults:
+  message_limit: 50
+  parse_mode: "HTML"    # HTML or Markdown
+
+# Allowed chat IDs (empty = allow all)
+allowed_chats: []
+
+memory:
+  auto_save_summaries: true
+  export_format: "markdown"
+
+# Background polling for new messages
+polling:
+  enabled: false
+  interval: 60
+  watch_chats: []
+
+# Chat bridge — Telegram as a chat frontend to Agent Zero
+chat_bridge:
+  auto_start: false
+  # Chats are managed via the telegram_chat tool, not config
+
+  # User allowlist: only these Telegram user IDs can interact with the bot.
+  # Empty list = allow all users. Get IDs via @userinfobot on Telegram.
+  allowed_users: []
+
+  # Elevated mode: allows authenticated users to access the full Agent Zero
+  # agent loop (with tools, code execution, file access, etc.) via Telegram.
+  # Default is restricted mode (conversation only, no tools).
+  allow_elevated: false
+  # Auth key for elevated mode. Auto-generated on first use if left empty.
+  # Shown in WebUI settings. Required to authenticate via !auth <key> in Telegram.
+  auth_key: ""
+  # Session timeout in seconds (default: 5 minutes). Elevated sessions expire
+  # after this duration and must be re-authenticated.
+  session_timeout: 300
+
+# Security — prompt injection defense
+security:
+  max_message_length: 4096
+  sanitize_content: true
+  strip_injection_patterns: true

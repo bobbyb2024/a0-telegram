@@ -1,0 +1,9 @@
+name: telegram
+title: Telegram Integration
+description: Send, receive, and manage messages via Telegram Bot API with real-time chat bridge support.
+version: 1.0.0
+settings_sections:
+  - external
+per_project_config: true
+per_agent_config: true
+always_enabled: false
