@@ -24,9 +24,32 @@ class TelegramConfigApi(ApiHandler):
         return {"error": "Unknown action"}
 
     def _generate_auth_key(self) -> dict:
-        """Generate a new random auth key for elevated mode."""
+        """Generate a new random auth key and persist it to config.json.
+
+        Persisting immediately ensures the bridge reads the same key the
+        user sees in the UI, even if the outer Save button hasn't been
+        clicked yet.
+        """
         try:
-            from plugins.telegram.helpers.sanitize import generate_auth_key
-            return {"auth_key": generate_auth_key()}
+            from pathlib import Path
+            import json
+            from plugins.telegram.helpers.sanitize import generate_auth_key, secure_write_json
+
+            key = generate_auth_key()
+
+            # Persist to config.json so the bridge picks it up immediately
+            config_candidates = [
+                Path("/a0/usr/plugins/telegram/config.json"),
+                Path("/a0/plugins/telegram/config.json"),
+                Path(__file__).parent.parent / "config.json",
+            ]
+            for cp in config_candidates:
+                if cp.exists():
+                    existing = json.loads(cp.read_text())
+                    existing.setdefault("chat_bridge", {})["auth_key"] = key
+                    secure_write_json(cp, existing)
+                    break
+
+            return {"auth_key": key}
         except Exception:
             return {"error": "Failed to generate auth key."}

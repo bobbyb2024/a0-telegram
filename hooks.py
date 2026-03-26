@@ -125,6 +125,24 @@ def install(**kwargs):
     logger.info("Post-install hook complete")
 
 
+def save_plugin_config(settings: dict, **kwargs) -> dict:
+    """Called before the framework writes config.json.
+
+    If allow_elevated is enabled and no auth_key exists, generate one
+    immediately so the key is available in the UI without a bridge restart.
+    """
+    bridge = settings.get("chat_bridge", {})
+    if bridge.get("allow_elevated", False) and not bridge.get("auth_key", ""):
+        try:
+            from plugins.telegram.helpers.sanitize import generate_auth_key
+            bridge["auth_key"] = generate_auth_key()
+            settings["chat_bridge"] = bridge
+            logger.info("Auto-generated auth key on config save")
+        except Exception:
+            pass  # Non-fatal; _get_auth_key() fallback still exists
+    return settings
+
+
 def uninstall(**kwargs):
     """Pre-uninstall hook: clean up symlink, skills, bridge runner."""
     a0_root = _get_a0_root()
