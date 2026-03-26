@@ -7,7 +7,6 @@
         if (!config.memory) config.memory = {};
         if (!config.polling) config.polling = {};
         if (!config.chat_bridge) config.chat_bridge = {};
-        if (!config.security) config.security = {};
         if (config.allowed_chats === undefined) config.allowed_chats = [];
     ">
         <template x-if="config">
@@ -201,38 +200,6 @@
                         </div>
                     </div>
                 </template>
-
-                <!-- Security -->
-                <div class="section-title">Security</div>
-                <div class="section-description">Prompt injection defense settings.</div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Sanitize message content</div>
-                        <div class="field-description">Strip potentially dangerous content from incoming messages.</div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox" x-model="config.security.sanitize_content"
-                                x-init="if (config.security.sanitize_content === undefined) config.security.sanitize_content = true" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="field">
-                    <div class="field-label">
-                        <div class="field-title">Strip injection patterns</div>
-                        <div class="field-description">Remove known prompt injection patterns from messages.</div>
-                    </div>
-                    <div class="field-control">
-                        <label class="toggle">
-                            <input type="checkbox" x-model="config.security.strip_injection_patterns"
-                                x-init="if (config.security.strip_injection_patterns === undefined) config.security.strip_injection_patterns = true" />
-                            <span class="toggler"></span>
-                        </label>
-                    </div>
-                </div>
             </div>
         </template>
     </div>
