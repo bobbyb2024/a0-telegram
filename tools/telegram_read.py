@@ -175,7 +175,7 @@ class TelegramRead(Tool):
         except TelegramAPIError as e:
             return Response(message=f"Telegram API error: {e}", break_loop=False)
         except Exception as e:
-            return Response(message=f"Error reading Telegram: {e}", break_loop=False)
+            return Response(message=f"Error reading Telegram: {type(e).__name__}", break_loop=False)
 
 
 def _format_chat_info(chat: dict) -> str:

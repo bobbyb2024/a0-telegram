@@ -54,7 +54,18 @@ def install(**kwargs):
     data_dir.mkdir(exist_ok=True)
     os.chmod(str(data_dir), 0o700)
 
-    # 3. Create symlink so 'from plugins.telegram.helpers...' imports work
+    # 3. Pre-create config.json with restrictive permissions (0o600).
+    # The framework's write_file() preserves permissions on existing files,
+    # so subsequent saves via the settings UI will keep 0o600.
+    config_file = plugin_dir / "config.json"
+    if not config_file.exists():
+        import json
+        fd = os.open(str(config_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({}, f)
+        logger.info("Created config.json with 0o600 permissions")
+
+    # 4. Create symlink so 'from plugins.telegram.helpers...' imports work
     symlink = a0_root / "plugins" / plugin_name
     if not symlink.exists():
         symlink.symlink_to(plugin_dir)
@@ -69,7 +80,7 @@ def install(**kwargs):
         symlink.symlink_to(plugin_dir)
         logger.info("Replaced directory with symlink: %s -> %s", symlink, plugin_dir)
 
-    # 4. Install skills
+    # 5. Install skills
     skills_src = plugin_dir / "skills"
     skills_dst = a0_root / "usr" / "skills"
     if skills_src.is_dir():
@@ -83,7 +94,7 @@ def install(**kwargs):
                         dest.write_bytes(f.read_bytes())
                 logger.info("Installed skill: %s", skill_dir.name)
 
-    # 5. Install Python dependencies via initialize.py
+    # 6. Install Python dependencies via initialize.py
     init_script = plugin_dir / "initialize.py"
     if init_script.is_file():
         python = _find_python()
@@ -101,7 +112,7 @@ def install(**kwargs):
         except subprocess.TimeoutExpired:
             logger.warning("Dependency install timed out")
 
-    # 6. Mirror to /git/agent-zero if running in /a0 runtime
+    # 7. Mirror to /git/agent-zero if running in /a0 runtime
     if str(a0_root) == "/a0" and Path("/git/agent-zero/usr").is_dir():
         git_plugin = Path("/git/agent-zero/usr/plugins") / plugin_name
         if not git_plugin.exists():

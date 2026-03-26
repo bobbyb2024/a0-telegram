@@ -464,7 +464,7 @@ class ChatBridgeBot:
                     chat_id, user_text, message
                 )
         except Exception as e:
-            logger.error(f"Agent error: {type(e).__name__}: {e}", exc_info=True)
+            logger.error("Agent error: %s", type(e).__name__, exc_info=True)
             response_text = "An error occurred while processing your message."
 
         # Send response, splitting if needed
@@ -585,7 +585,7 @@ class ChatBridgeBot:
         except ImportError:
             return await self._get_agent_response_http(chat_id, text)
         except Exception as e:
-            logger.error(f"Elevated mode error: {type(e).__name__}: {e}", exc_info=True)
+            logger.error("Elevated mode error: %s", type(e).__name__, exc_info=True)
             # If agent loop failed, invalidate the context so a fresh one is created next time
             set_context_id(chat_id, "")
             raise
@@ -753,7 +753,7 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
 
         loop.run_until_complete(_start())
     except Exception as e:
-        logger.error(f"Chat bridge bot exited with error: {type(e).__name__}: {e}")
+        logger.error("Chat bridge bot exited with error: %s", type(e).__name__, exc_info=True)
     finally:
         logger.info("Chat bridge bot thread ending, cleaning up singleton")
         bot._running = False

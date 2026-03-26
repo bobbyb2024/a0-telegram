@@ -134,7 +134,7 @@ class TelegramSummarize(Tool):
         except TelegramAPIError as e:
             return Response(message=f"Telegram API error: {e}", break_loop=False)
         except Exception as e:
-            return Response(message=f"Error summarizing: {e}", break_loop=False)
+            return Response(message=f"Error summarizing: {type(e).__name__}", break_loop=False)
 
 
 async def _save_to_memory(agent, text: str):

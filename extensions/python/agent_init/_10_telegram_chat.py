@@ -71,4 +71,4 @@ class TelegramChatBridgeInit(Extension):
             logger.warning("Telegram chat bridge auto-start scheduled.")
 
         except Exception as e:
-            logger.warning(f"Telegram chat bridge auto-start failed: {e}")
+            logger.warning("Telegram chat bridge auto-start failed: %s", type(e).__name__, exc_info=True)
