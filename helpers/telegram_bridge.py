@@ -11,6 +11,7 @@ SECURITY MODEL:
 """
 
 import asyncio
+import atexit
 import collections
 import hmac
 import json
@@ -105,6 +106,55 @@ _fatal_error_type: Optional[str] = None  # "token" | "config" | "unknown"
 # Seeded from chat_bridge.debug_mode in config at bridge startup; changes
 # made via the API are in-memory and apply to the live bridge immediately.
 _debug_mode: bool = False
+
+# Ensures the interpreter-shutdown cleanup hook is only registered once
+# per process, regardless of how many times start_chat_bridge is called.
+_atexit_registered: bool = False
+
+
+def _atexit_stop_bridge() -> None:
+    """Best-effort bridge shutdown at interpreter exit.
+
+    The bot runs in a daemon thread with its own asyncio event loop. During
+    normal container shutdown (SIGTERM → interpreter exit), Python's atexit
+    runs ``concurrent.futures.thread._python_exit``, which tears down every
+    ``ThreadPoolExecutor`` — including the default executor that asyncio
+    uses for DNS ``getaddrinfo`` calls. Any in-flight ``get_updates`` in
+    PTB's polling loop then raises
+    ``RuntimeError("cannot schedule new futures after shutdown")``, which
+    PTB wraps as ``NetworkError`` and retries in a tight loop until the
+    process is killed.
+
+    Registering this hook via ``atexit`` (LIFO order) ensures we stop the
+    updater BEFORE the executor is torn down, so the polling loop exits
+    cleanly instead of spamming the log.
+    """
+    inst = _bot_instance
+    loop = _bot_loop
+    thread = _bot_thread
+    if inst is None:
+        return
+    try:
+        inst._running = False
+        if loop is not None and loop.is_running():
+            async def _graceful():
+                app = getattr(inst, "_application", None)
+                if app is None:
+                    return
+                try:
+                    if getattr(app, "updater", None) and app.updater.running:
+                        await app.updater.stop()
+                except Exception:
+                    pass
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_graceful(), loop)
+                fut.result(timeout=5)
+            except Exception:
+                pass
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+    except Exception:
+        pass
 
 
 def set_debug_mode(enabled: bool) -> bool:
@@ -2734,6 +2784,7 @@ async def start_chat_bridge(bot_token: str) -> ChatBridgeBot:
     requiring an agent restart.
     """
     global _bot_instance, _bot_thread, _bot_loop, _fatal_error, _fatal_error_type
+    global _atexit_registered
 
     if not bot_token or not bot_token.strip():
         raise ValueError("Cannot start chat bridge: bot token is empty or not configured.")
@@ -2741,6 +2792,15 @@ async def start_chat_bridge(bot_token: str) -> ChatBridgeBot:
     # Clear any previous fatal error — the caller may have updated the token.
     _fatal_error = None
     _fatal_error_type = None
+
+    # Register the interpreter-shutdown hook once per process. Registering
+    # here (rather than at module import) guarantees it runs AFTER any
+    # ThreadPoolExecutor._python_exit hook registered earlier, so atexit's
+    # LIFO order plays ours first and the updater stops before the executor
+    # is torn down.
+    if not _atexit_registered:
+        atexit.register(_atexit_stop_bridge)
+        _atexit_registered = True
 
     with _start_lock:
         _cleanup_dead_bot()
