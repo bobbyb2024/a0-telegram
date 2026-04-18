@@ -28,8 +28,11 @@ chat_bridge:
   auto_start: false
   # Chats are managed via the telegram_chat tool, not config
 
-  # User allowlist: only these Telegram user IDs can interact with the bot.
-  # Empty list = allow all users. Get IDs via @userinfobot on Telegram.
+  # User allowlist: only these Telegram users can interact with the bot.
+  # Empty list = allow everyone. Accepts:
+  #   - NUMERIC user ID (preferred, stable): 123456789
+  #   - @username (fragile — breaks if user changes handle): "@bobbyb"
+  # Get the numeric ID by messaging @userinfobot on Telegram.
   allowed_users: []
 
   # Full agent mode (NEW DEFAULT, v1.3+): treat Telegram as a frontend to

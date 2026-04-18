@@ -26,7 +26,7 @@ logger = logging.getLogger("telegram_chat_bridge")
 # Bumped on every behaviour change so startup logs clearly show which code is
 # running.  If you see an old BRIDGE_CODE_VERSION in the logs after deploying,
 # the container's __pycache__ is stale — delete *.pyc and restart the bridge.
-BRIDGE_CODE_VERSION = "2026-04-18-diag-1"
+BRIDGE_CODE_VERSION = "2026-04-18-diag-2"
 
 # Protects all load-mutate-save cycles on the chat state file so concurrent
 # tool calls (running on the bridge thread or a separate thread) cannot
@@ -297,6 +297,35 @@ class ChatBridgeBot:
 
     def _session_key(self, user_id: str, chat_id: str) -> str:
         return f"{user_id}:{chat_id}"
+
+    def _user_is_allowed(self, user_id: str, username: str, allowed_users: list) -> bool:
+        """Match a user against the allowed_users allowlist.
+
+        Accepts entries as:
+          - numeric Telegram user ID: 123456789 (preferred — the ONLY reliable
+            identifier; usernames can be changed at any time)
+          - "@username" or "username" (matched case-insensitively against the
+            user's current @username; requires the user to have one set)
+
+        Returns True when the allowlist is empty (allow everyone) or when the
+        user matches at least one entry.
+        """
+        if not allowed_users:
+            return True
+
+        uid = str(user_id)
+        uname = (username or "").lstrip("@").lower()
+        for entry in allowed_users:
+            s = str(entry).strip()
+            if not s:
+                continue
+            # Numeric ID match
+            if s.isdigit() and s == uid:
+                return True
+            # @username match (case-insensitive, optional leading @)
+            if uname and s.lstrip("@").lower() == uname:
+                return True
+        return False
 
     def _ensure_project_mapping(self, conv_key: str, chat_id: str, thread_id, message):
         """Register a project mapping for this conversation if one doesn't exist.
@@ -645,20 +674,28 @@ class ChatBridgeBot:
         if chat_list:
             # Check both the topic key and the base chat_id
             if conv_key not in chat_list and chat_id not in chat_list:
-                logger.debug(
-                    "Message from chat %s (user %s) ignored — chat not in bridge list. "
-                    "Add it with the telegram_chat tool (action=add) or via Settings.",
-                    chat_id, user_id,
+                logger.warning(
+                    "DROP: chat %s (conv_key=%s, user %s) not in bridge chat_list=%s. "
+                    "Add it with the telegram_chat tool (action=add) or empty the list "
+                    "to respond everywhere.",
+                    chat_id, conv_key, user_id, list(chat_list.keys()),
                 )
                 return
 
-        # User allowlist
+        # User allowlist — accepts both numeric IDs and @username entries
         config = self._get_config()
         allowed_users = config.get("chat_bridge", {}).get("allowed_users", [])
-        if allowed_users and user_id not in [str(u) for u in allowed_users]:
-            logger.debug(
-                "Message from user %s in chat %s ignored — user not in allowed_users list.",
-                user_id, chat_id,
+        username = getattr(message.from_user, "username", "") if message.from_user else ""
+        if not self._user_is_allowed(user_id, username, allowed_users):
+            # WARNING (not DEBUG) so this is visible at default log level —
+            # the #1 cause of "my messages don't work" is an allowlist entry
+            # that doesn't match the sender.
+            logger.warning(
+                "DROP: user %s (@%s) in chat %s not in allowed_users=%s. "
+                "Use the NUMERIC user ID (message @userinfobot to get it), "
+                "an @username, or empty the allowlist to allow everyone.",
+                user_id, username or "?", chat_id,
+                [str(u) for u in allowed_users],
             )
             return
 
@@ -1168,10 +1205,15 @@ class ChatBridgeBot:
         except Exception:
             pass
 
-        # Check allowed users
+        # Check allowed users — accepts both numeric IDs and @username entries
         config = self._get_config()
         allowed_users = config.get("chat_bridge", {}).get("allowed_users", [])
-        if allowed_users and user_id not in [str(u) for u in allowed_users]:
+        username = getattr(query.from_user, "username", "") if query.from_user else ""
+        if not self._user_is_allowed(user_id, username, allowed_users):
+            logger.warning(
+                "DROP callback: user %s (@%s) not in allowed_users=%s",
+                user_id, username or "?", [str(u) for u in allowed_users],
+            )
             return
 
         message_id = query.message.message_id
@@ -1679,6 +1721,12 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
                 chat_list_keys = list(get_chat_list().keys())
                 allowed_users = bridge_cfg.get("allowed_users", []) or []
                 full_agent = bridge_cfg.get("full_agent_mode", True)
+
+                # Classify allowlist entries so misuse jumps out in the log.
+                numeric_ids = [str(u) for u in allowed_users if str(u).strip().isdigit()]
+                at_usernames = [str(u) for u in allowed_users
+                                if not str(u).strip().isdigit() and str(u).strip()]
+
                 logger.info("=" * 72)
                 logger.info("Chat bridge startup — BRIDGE_CODE_VERSION=%s", BRIDGE_CODE_VERSION)
                 logger.info("  Bot:             @%s (ID: %s)", me.username, me.id)
@@ -1690,7 +1738,14 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
                 logger.info("  allowed_users:   %d entries %s",
                             len(allowed_users),
                             "(EMPTY → allow every user)" if not allowed_users
-                            else f"→ {[str(u) for u in allowed_users[:10]]}")
+                            else f"→ numeric={numeric_ids} @username={at_usernames}")
+                if at_usernames:
+                    logger.warning(
+                        "  allowed_users contains @username entries (%s). "
+                        "These match by current Telegram @username — fragile if the user "
+                        "changes it. PREFER numeric user IDs from @userinfobot.",
+                        at_usernames,
+                    )
                 logger.info("=" * 72)
 
                 # Register bot commands with Telegram.
