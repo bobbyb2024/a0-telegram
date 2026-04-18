@@ -35,6 +35,8 @@ class TelegramBridgeApi(ApiHandler):
                 return self._map_topic(input)
             elif action == "unmap_topic":
                 return self._unmap_topic(input)
+            elif action == "diagnose":
+                return self._diagnose()
             else:
                 return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
@@ -117,6 +119,63 @@ class TelegramBridgeApi(ApiHandler):
         if removed is not None:
             save_chat_state(state)
         return {"ok": True, "removed": removed is not None, "topic_key": topic_key}
+
+    def _diagnose(self) -> dict:
+        """Dump the bridge's view of the world for 'messages don't arrive' triage.
+
+        Returns:
+          - bridge_code_version (confirms new code is loaded)
+          - bridge status (running, bot identity, fatal error if any)
+          - chat_list keys + size (empty = respond everywhere)
+          - allowed_users + size (empty = allow everyone)
+          - full_agent_mode setting
+          - topics (project mappings)
+          - privacy mode hint for groups
+          - ready-to-paste curl command for getUpdates to test the token directly
+        """
+        try:
+            from usr.plugins.telegram.helpers.telegram_bridge import (
+                BRIDGE_CODE_VERSION, get_bot_status, get_chat_list, get_topic_map,
+            )
+            from usr.plugins.telegram.helpers.telegram_client import get_telegram_config
+
+            cfg = get_telegram_config()
+            bridge_cfg = cfg.get("chat_bridge", {}) or {}
+            chat_list = get_chat_list()
+            topics = get_topic_map()
+            token = (cfg.get("bot", {}).get("token", "") or "").strip()
+            token_masked = f"{token[:6]}…{token[-4:]}" if token and len(token) > 12 else "(unset)"
+
+            status = get_bot_status()
+
+            return {
+                "ok": True,
+                "bridge_code_version": BRIDGE_CODE_VERSION,
+                "status": status,
+                "token_present": bool(token),
+                "token_masked": token_masked,
+                "full_agent_mode": bridge_cfg.get("full_agent_mode", True),
+                "allow_elevated": bridge_cfg.get("allow_elevated", False),
+                "chat_list": {
+                    "size": len(chat_list),
+                    "keys": list(chat_list.keys()),
+                    "note": "EMPTY → respond in every chat" if not chat_list else None,
+                },
+                "allowed_users": {
+                    "size": len(bridge_cfg.get("allowed_users", []) or []),
+                    "ids": [str(u) for u in (bridge_cfg.get("allowed_users", []) or [])],
+                    "note": "EMPTY → allow every user" if not bridge_cfg.get("allowed_users") else None,
+                },
+                "topic_mappings": len(topics),
+                "hints": [
+                    "Look for 'UPDATE #' lines in the log to confirm messages arrive.",
+                    "No UPDATE lines → bot privacy mode in groups, or polling not running.",
+                    "UPDATE but no MSG recv → chat_list or allowed_users filter dropped it.",
+                ],
+            }
+        except Exception as e:
+            logger.error("diagnose error: %s: %s", type(e).__name__, e, exc_info=True)
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     async def _restart(self) -> dict:
         from usr.plugins.telegram.helpers.telegram_bridge import get_bot_status, start_chat_bridge, stop_chat_bridge

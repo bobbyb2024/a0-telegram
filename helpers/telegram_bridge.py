@@ -23,6 +23,11 @@ from typing import Optional
 
 logger = logging.getLogger("telegram_chat_bridge")
 
+# Bumped on every behaviour change so startup logs clearly show which code is
+# running.  If you see an old BRIDGE_CODE_VERSION in the logs after deploying,
+# the container's __pycache__ is stale — delete *.pyc and restart the bridge.
+BRIDGE_CODE_VERSION = "2026-04-18-diag-1"
+
 # Protects all load-mutate-save cycles on the chat state file so concurrent
 # tool calls (running on the bridge thread or a separate thread) cannot
 # interleave and silently overwrite each other's updates.
@@ -1465,6 +1470,53 @@ class ChatBridgeBot:
         except Exception as _e:
             logger.debug("_safe_reply failed: %s", _e)
 
+    async def _on_any_update(self, update, context_obj):
+        """Pre-filter logger — runs at group=-1 for EVERY Telegram update.
+
+        Logs every update PTB receives, before any filter or handler has a
+        chance to drop it.  If this line never appears when a user sends a
+        message, the problem is upstream of the bridge (bot privacy mode,
+        wrong token, a second polling session stealing updates, or polling
+        not actually running).  Does NOT raise ApplicationHandlerStop so the
+        real handlers still run.
+        """
+        try:
+            update_id = getattr(update, "update_id", None)
+            msg = getattr(update, "effective_message", None)
+            cbq = getattr(update, "callback_query", None)
+            if msg is not None:
+                chat = getattr(msg, "chat", None)
+                chat_id = getattr(chat, "id", None)
+                chat_type = getattr(chat, "type", "?")
+                thread_id = getattr(msg, "message_thread_id", None)
+                frm = getattr(msg, "from_user", None)
+                user_id = getattr(frm, "id", None) if frm else None
+                text_preview = (msg.text or msg.caption or "")[:60].replace("\n", " ") if hasattr(msg, "text") else ""
+                media = []
+                for attr in ("voice", "audio", "photo", "document", "video", "sticker"):
+                    if getattr(msg, attr, None):
+                        media.append(attr)
+                logger.info(
+                    "UPDATE #%s: msg chat=%s(%s) thread=%s user=%s text=%r media=%s",
+                    update_id, chat_id, chat_type, thread_id, user_id,
+                    text_preview, ",".join(media) or "-",
+                )
+            elif cbq is not None:
+                logger.info(
+                    "UPDATE #%s: callback_query data=%r from_user=%s",
+                    update_id, getattr(cbq, "data", None),
+                    getattr(getattr(cbq, "from_user", None), "id", None),
+                )
+            else:
+                # Unknown update type (channel post, chat_member, etc.)
+                kinds = [k for k in ("edited_message", "channel_post", "my_chat_member",
+                                     "chat_member", "poll", "poll_answer",
+                                     "message_reaction", "forum_topic_created")
+                         if getattr(update, k, None) is not None]
+                logger.info("UPDATE #%s: kind=%s", update_id, ",".join(kinds) or "unknown")
+        except Exception as e:
+            logger.debug("_on_any_update logger failed: %s", e)
+
     async def _error_handler(self, update, context_obj):
         """PTB application-level error handler.
 
@@ -1549,10 +1601,19 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             from telegram.ext import ApplicationBuilder, MessageHandler, filters
 
         import telegram.error as tg_error
-        from telegram.ext import CallbackQueryHandler, CommandHandler
+        from telegram.ext import CallbackQueryHandler, CommandHandler, TypeHandler
+        from telegram import Update as _TGUpdate
 
         app = ApplicationBuilder().token(bot.bot_token).build()
         bot._application = app
+
+        # -----------------------------------------------------------------
+        # DIAGNOSTIC PRE-LOGGER (group=-1) — runs BEFORE any real handler
+        # and logs every update.  If this line is missing when a user sends
+        # a message, the problem is upstream of the bridge (privacy mode,
+        # token mismatch, polling conflict, or polling not running).
+        # -----------------------------------------------------------------
+        app.add_handler(TypeHandler(_TGUpdate, bot._on_any_update), group=-1)
 
         # Register message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot._on_message))
@@ -1609,7 +1670,28 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
 
                 me = await app.bot.get_me()
                 bot._bot_user = me
-                logger.info("Chat bridge connected as @%s (ID: %s)", me.username, me.id)
+
+                # Startup banner — confirms which code version is running and
+                # summarises the security gate config so silent drops can be
+                # diagnosed instantly.
+                cfg = bot._get_config()
+                bridge_cfg = cfg.get("chat_bridge", {})
+                chat_list_keys = list(get_chat_list().keys())
+                allowed_users = bridge_cfg.get("allowed_users", []) or []
+                full_agent = bridge_cfg.get("full_agent_mode", True)
+                logger.info("=" * 72)
+                logger.info("Chat bridge startup — BRIDGE_CODE_VERSION=%s", BRIDGE_CODE_VERSION)
+                logger.info("  Bot:             @%s (ID: %s)", me.username, me.id)
+                logger.info("  full_agent_mode: %s", full_agent)
+                logger.info("  chat_list:       %d entries %s",
+                            len(chat_list_keys),
+                            "(EMPTY → respond in every chat)" if not chat_list_keys
+                            else f"→ {chat_list_keys[:10]}")
+                logger.info("  allowed_users:   %d entries %s",
+                            len(allowed_users),
+                            "(EMPTY → allow every user)" if not allowed_users
+                            else f"→ {[str(u) for u in allowed_users[:10]]}")
+                logger.info("=" * 72)
 
                 # Register bot commands with Telegram.
                 # PTB v21 accepts (command, description) tuples directly.
