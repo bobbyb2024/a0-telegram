@@ -75,6 +75,10 @@ _bot_thread: Optional[threading.Thread] = None
 _bot_loop: Optional[asyncio.AbstractEventLoop] = None
 _auto_start_attempted: bool = False
 
+# Prevents concurrent start_chat_bridge calls from racing past the
+# _bot_instance guard and spawning duplicate getUpdates sessions.
+_start_lock = threading.Lock()
+
 CHAT_STATE_FILE = "chat_bridge_state.json"
 
 
@@ -1376,6 +1380,17 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             except Exception as e:
                 logger.warning(f"Could not register bot commands: {e}")
 
+            # Drop any active webhook or lingering getUpdates session from a
+            # previous run.  This is the standard fix for the
+            # "Conflict: terminated by other getUpdates request" error —
+            # calling deleteWebhook forces Telegram to close the old session
+            # before we open a new long-poll connection.
+            try:
+                await app.bot.delete_webhook(drop_pending_updates=True)
+                logger.debug("delete_webhook: cleared any lingering session.")
+            except Exception as _dw_exc:
+                logger.debug("delete_webhook skipped: %s", _dw_exc)
+
             ready_event.set()
             await app.updater.start_polling(
                 drop_pending_updates=True,
@@ -1409,37 +1424,44 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
 
 
 async def start_chat_bridge(bot_token: str) -> ChatBridgeBot:
-    """Start the chat bridge bot in a dedicated background thread."""
+    """Start the chat bridge bot in a dedicated background thread.
+
+    A threading.Lock prevents concurrent calls from racing past the
+    _bot_instance guard and spawning duplicate getUpdates sessions,
+    which Telegram rejects with a 409 Conflict error.
+    """
     global _bot_instance, _bot_thread, _bot_loop
 
     if not bot_token or not bot_token.strip():
         raise ValueError("Cannot start chat bridge: bot token is empty or not configured.")
 
-    _cleanup_dead_bot()
+    with _start_lock:
+        _cleanup_dead_bot()
 
-    if _bot_instance and _is_bot_alive():
-        return _bot_instance
+        if _bot_instance and _is_bot_alive():
+            return _bot_instance
 
-    # Force-close any leftover instance
-    if _bot_instance:
-        _bot_instance._running = False
-        _bot_instance = None
-        _bot_thread = None
-        _bot_loop = None
+        # Force-close any leftover instance whose thread has already died
+        if _bot_instance:
+            _bot_instance._running = False
+            _bot_instance = None
+            _bot_thread = None
+            _bot_loop = None
 
-    bot = ChatBridgeBot(bot_token)
-    _bot_instance = bot
+        bot = ChatBridgeBot(bot_token)
+        _bot_instance = bot
 
-    ready_event = threading.Event()
-    thread = threading.Thread(
-        target=_run_bot_in_thread,
-        args=(bot, ready_event),
-        daemon=True,
-        name="telegram-chat-bridge",
-    )
-    _bot_thread = thread
-    thread.start()
+        ready_event = threading.Event()
+        thread = threading.Thread(
+            target=_run_bot_in_thread,
+            args=(bot, ready_event),
+            daemon=True,
+            name="telegram-chat-bridge",
+        )
+        _bot_thread = thread
+        thread.start()
 
+    # Wait outside the lock so stop_chat_bridge can acquire it if needed
     ready_event.wait(timeout=35)
 
     if not bot._running:
@@ -1449,15 +1471,23 @@ async def start_chat_bridge(bot_token: str) -> ChatBridgeBot:
 
 
 async def stop_chat_bridge():
-    """Stop the chat bridge bot."""
+    """Stop the chat bridge bot and wait for its thread to fully exit.
+
+    Waiting for thread death ensures the PTB application has completed
+    app.updater.stop() → app.stop() → app.shutdown() before we return,
+    so any subsequent start_chat_bridge() call opens a fresh getUpdates
+    session rather than racing with the closing one.
+    """
     global _bot_instance, _bot_thread, _bot_loop
 
     if _bot_instance:
         _bot_instance._running = False
 
-    # Wait for thread to finish
+    # Give the thread up to 15 s to finish its shutdown sequence
     if _bot_thread and _bot_thread.is_alive():
-        _bot_thread.join(timeout=10)
+        _bot_thread.join(timeout=15)
+        if _bot_thread.is_alive():
+            logger.warning("Bridge thread did not exit within 15 s; proceeding anyway.")
 
     _bot_instance = None
     _bot_thread = None
