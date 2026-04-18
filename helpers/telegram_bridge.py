@@ -79,6 +79,13 @@ _auto_start_attempted: bool = False
 # _bot_instance guard and spawning duplicate getUpdates sessions.
 _start_lock = threading.Lock()
 
+# Set when the bridge encounters a fatal, non-recoverable error (e.g. invalid
+# bot token).  The watchdog checks this flag and stops retrying instead of
+# entering an infinite restart loop.  Cleared by start_chat_bridge() so a
+# user can recover by updating their token and clicking "Start Bridge".
+_fatal_error: Optional[str] = None       # human-readable reason
+_fatal_error_type: Optional[str] = None  # "token" | "config" | "unknown"
+
 CHAT_STATE_FILE = "chat_bridge_state.json"
 
 
@@ -1309,7 +1316,7 @@ def _cleanup_dead_bot():
 
 def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
     """Run the bot in a dedicated thread with its own event loop."""
-    global _bot_instance, _bot_thread, _bot_loop
+    global _bot_instance, _bot_thread, _bot_loop, _fatal_error, _fatal_error_type
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1327,6 +1334,7 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             subprocess.run([python, "-m", "pip", "install", "python-telegram-bot>=21.0,<22"], capture_output=True, check=True)
             from telegram.ext import ApplicationBuilder, MessageHandler, filters
 
+        import telegram.error as tg_error
         from telegram.ext import CallbackQueryHandler, CommandHandler
 
         app = ApplicationBuilder().token(bot.bot_token).build()
@@ -1367,57 +1375,124 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
         bot._running = True
 
         async def _start():
-            await app.initialize()
-            await app.start()
-            me = await app.bot.get_me()
-            bot._bot_user = me
-            logger.info(f"Chat bridge connected as @{me.username} (ID: {me.id})")
+            """Initialise, run, and tear down the PTB Application.
 
-            # Register bot commands with Telegram.
-            # PTB v21 accepts (command, description) tuples directly.
-            # Note: Telegram rejects descriptions containing < or > — keep
-            # descriptions to plain ASCII with no HTML-like characters.
+            Uses a try/finally so app.shutdown() is *always* called — this
+            closes underlying aiohttp / httpx client sessions and prevents the
+            "Unclosed client session" warnings that appear when the bot exits
+            with an error (e.g. InvalidToken) before the normal shutdown path.
+            """
+            app_initialized = False
+            app_started = False
             try:
-                await app.bot.set_my_commands(
-                    [(c["command"], c["description"]) for c in BRIDGE_COMMANDS]
-                )
-                logger.info("Registered %d bot commands", len(BRIDGE_COMMANDS))
-            except Exception as e:
-                logger.warning(
-                    "Could not register bot commands: %s: %s",
-                    type(e).__name__, e, exc_info=True,
-                )
+                await app.initialize()
+                app_initialized = True
 
-            # Drop any active webhook or lingering getUpdates session from a
-            # previous run.  This is the standard fix for the
-            # "Conflict: terminated by other getUpdates request" error —
-            # calling deleteWebhook forces Telegram to close the old session
-            # before we open a new long-poll connection.
-            try:
-                await app.bot.delete_webhook(drop_pending_updates=True)
-                logger.debug("delete_webhook: cleared any lingering session.")
-            except Exception as _dw_exc:
-                logger.debug("delete_webhook skipped: %s", _dw_exc)
+                me = await app.bot.get_me()
+                bot._bot_user = me
+                logger.info("Chat bridge connected as @%s (ID: %s)", me.username, me.id)
 
-            ready_event.set()
-            await app.updater.start_polling(
-                drop_pending_updates=True,
-                allowed_updates=[
-                    "message", "edited_message", "callback_query",
-                    "message_reaction", "forum_topic_created",
-                    "forum_topic_edited", "forum_topic_closed", "forum_topic_reopened",
-                ],
-            )
-            # Keep running until stopped
-            while bot._running:
-                await asyncio.sleep(1)
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
+                # Register bot commands with Telegram.
+                # PTB v21 accepts (command, description) tuples directly.
+                # Note: Telegram rejects descriptions containing < or > — keep
+                # descriptions to plain ASCII with no HTML-like characters.
+                try:
+                    await app.bot.set_my_commands(
+                        [(c["command"], c["description"]) for c in BRIDGE_COMMANDS]
+                    )
+                    logger.info("Registered %d bot commands", len(BRIDGE_COMMANDS))
+                except Exception as e:
+                    logger.warning(
+                        "Could not register bot commands: %s: %s",
+                        type(e).__name__, e, exc_info=True,
+                    )
+
+                # Drop any active webhook or lingering getUpdates session from a
+                # previous run.  This is the standard fix for the
+                # "Conflict: terminated by other getUpdates request" error —
+                # calling deleteWebhook forces Telegram to close the old session
+                # before we open a new long-poll connection.
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=True)
+                    logger.debug("delete_webhook: cleared any lingering session.")
+                except Exception as _dw_exc:
+                    logger.debug("delete_webhook skipped: %s", _dw_exc)
+
+                await app.start()
+                app_started = True
+
+                ready_event.set()
+                await app.updater.start_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=[
+                        "message", "edited_message", "callback_query",
+                        "message_reaction", "forum_topic_created",
+                        "forum_topic_edited", "forum_topic_closed", "forum_topic_reopened",
+                    ],
+                )
+                # Keep running until _running is cleared by stop_chat_bridge()
+                while bot._running:
+                    await asyncio.sleep(1)
+                await app.updater.stop()
+
+            finally:
+                # Always shut down the application so that the underlying HTTP
+                # client sessions (aiohttp / httpx) are properly closed.
+                # Calling stop/shutdown on an un-started app is safe — PTB
+                # checks internal state before each step.
+                try:
+                    if app_started:
+                        await app.stop()
+                except Exception as _stop_exc:
+                    logger.debug("app.stop() during cleanup: %s", _stop_exc)
+                try:
+                    if app_initialized:
+                        await app.shutdown()
+                except Exception as _sd_exc:
+                    logger.debug("app.shutdown() during cleanup: %s", _sd_exc)
 
         loop.run_until_complete(_start())
+
     except Exception as e:
-        logger.error("Chat bridge bot exited with error: %s", type(e).__name__, exc_info=True)
+        # Classify the error so callers (watchdog, status API) can react
+        # appropriately rather than blindly retrying.
+        import telegram.error as tg_error  # re-import safe inside except
+        if isinstance(e, tg_error.InvalidToken):
+            _fatal_error = (
+                f"Bot token is invalid or has been revoked ({e}). "
+                "Update the token in Settings → External Services → Telegram Integration "
+                "and click Start Bridge (or restart the agent)."
+            )
+            _fatal_error_type = "token"
+            logger.error(
+                "FATAL — bot token invalid/revoked. The bridge will NOT restart "
+                "automatically. Update the token in plugin settings and start the bridge "
+                "again. (Raw error: %s)", e,
+            )
+        elif isinstance(e, tg_error.NetworkError):
+            logger.error(
+                "Chat bridge lost network connectivity: %s: %s — "
+                "the watchdog will attempt to restart.",
+                type(e).__name__, e,
+            )
+        elif isinstance(e, tg_error.TimedOut):
+            logger.error(
+                "Chat bridge timed out communicating with Telegram: %s — "
+                "the watchdog will attempt to restart.",
+                e,
+            )
+        elif isinstance(e, ValueError) and "token" in str(e).lower():
+            _fatal_error = (
+                f"Bot token appears malformed: {e}. "
+                "Check the token in plugin settings."
+            )
+            _fatal_error_type = "token"
+            logger.error("FATAL — malformed bot token: %s", e)
+        else:
+            logger.error(
+                "Chat bridge bot exited with unexpected error: %s: %s",
+                type(e).__name__, e, exc_info=True,
+            )
     finally:
         logger.info("Chat bridge bot thread ending, cleaning up singleton")
         bot._running = False
@@ -1437,11 +1512,19 @@ async def start_chat_bridge(bot_token: str) -> ChatBridgeBot:
     A threading.Lock prevents concurrent calls from racing past the
     _bot_instance guard and spawning duplicate getUpdates sessions,
     which Telegram rejects with a 409 Conflict error.
+
+    Any previous fatal error (e.g. invalid token) is cleared here so that
+    updating the token in settings and clicking Start Bridge recovers without
+    requiring an agent restart.
     """
-    global _bot_instance, _bot_thread, _bot_loop
+    global _bot_instance, _bot_thread, _bot_loop, _fatal_error, _fatal_error_type
 
     if not bot_token or not bot_token.strip():
         raise ValueError("Cannot start chat bridge: bot token is empty or not configured.")
+
+    # Clear any previous fatal error — the caller may have updated the token.
+    _fatal_error = None
+    _fatal_error_type = None
 
     with _start_lock:
         _cleanup_dead_bot()
@@ -1519,7 +1602,15 @@ def get_bot_status() -> dict:
     _cleanup_dead_bot()
 
     if _bot_instance is None:
-        return {"running": False, "status": "stopped"}
+        # Include fatal error detail so callers (WebUI, watchdog) can surface it
+        base = {"running": False}
+        if _fatal_error:
+            base["status"] = "error"
+            base["error"] = _fatal_error
+            base["error_type"] = _fatal_error_type or "unknown"
+        else:
+            base["status"] = "stopped"
+        return base
     if not _bot_instance._running:
         return {"running": False, "status": "stopped"}
     if _bot_thread and not _bot_thread.is_alive():

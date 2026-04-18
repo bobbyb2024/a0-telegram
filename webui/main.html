@@ -9,6 +9,13 @@
                     x-text="$store.tgMain.statusText"></span>
             </div>
 
+            <!-- Fatal error advisory (invalid/revoked token, etc.) -->
+            <div x-show="$store.tgMain.fatalError"
+                 style="background: #fce4ec; border: 1px solid #ef9a9a; border-radius: 6px; padding: 10px; margin-bottom: 14px; font-size: 11px; color: #b71c1c; line-height: 1.5;">
+                <strong>&#128308; Bridge Error:</strong>
+                <span x-text="$store.tgMain.fatalError"></span>
+            </div>
+
             <!-- Privacy mode advisory (shown when privacy mode is ON) -->
             <div x-show="$store.tgMain.privacyMode"
                  style="background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 10px; margin-bottom: 14px; font-size: 11px; color: #e65100; line-height: 1.5;">
@@ -141,6 +148,9 @@ createStore('tgMain', {
     bridgeStatusBg: '#f5f5f5',
     bridgeStatusColor: '#888',
 
+    // Fatal error (invalid token, etc.)
+    fatalError: '',
+
     // Forum topics panel
     topicsData: null,
     topicsEmpty: false,
@@ -163,6 +173,9 @@ createStore('tgMain', {
         if (data.restart_count !== undefined) this.restartCount = data.restart_count;
         this.webhookMode = data.webhook_mode ? 'Webhook' : 'Polling';
 
+        // Surface fatal errors (e.g. invalid/revoked token) prominently
+        this.fatalError = (data.status === 'error' && data.error) ? data.error : '';
+
         if (data.running && data.status === 'connected') {
             this.bridgeStatusText = 'Connected' + (data.user ? ' as ' + data.user : '');
             this.bridgeStatusBg = '#e8f5e9';
@@ -171,6 +184,10 @@ createStore('tgMain', {
             this.bridgeStatusText = data.status || 'Connecting...';
             this.bridgeStatusBg = '#fff3e0';
             this.bridgeStatusColor = '#e65100';
+        } else if (data.status === 'error') {
+            this.bridgeStatusText = 'Error';
+            this.bridgeStatusBg = '#fce4ec';
+            this.bridgeStatusColor = '#b71c1c';
         } else {
             this.bridgeStatusText = data.status || 'Stopped';
             this.bridgeStatusBg = '#f5f5f5';

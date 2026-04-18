@@ -38,8 +38,11 @@ class TelegramBridgeApi(ApiHandler):
             else:
                 return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
-            logger.error("Bridge API error on '%s': %s", action, type(e).__name__, exc_info=True)
-            return {"ok": False, "error": f"Bridge error: {type(e).__name__}"}
+            logger.error(
+                "Bridge API error on '%s': %s: %s",
+                action, type(e).__name__, e, exc_info=True,
+            )
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def _status(self) -> dict:
         from usr.plugins.telegram.helpers.telegram_bridge import get_bot_status, get_chat_list

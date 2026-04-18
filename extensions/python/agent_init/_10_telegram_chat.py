@@ -151,6 +151,18 @@ async def _watchdog(bot_token: str, config: dict, watchdog_cfg: dict) -> None:
             clean_since = now  # reset clean timer whenever bridge looks healthy
             continue
 
+        # Stop retrying on fatal errors (e.g. invalid/revoked bot token).
+        # The user must update the token in settings and manually start the bridge.
+        fatal = getattr(bridge, "_fatal_error", None)
+        fatal_type = getattr(bridge, "_fatal_error_type", None)
+        if fatal:
+            logger.error(
+                "Watchdog: bridge has a fatal %s error — automatic restart suppressed. "
+                "%s",
+                fatal_type or "unknown", fatal,
+            )
+            return
+
         if restarts >= max_restarts:
             logger.error(
                 "Watchdog: bridge is %s but max_restarts (%d) reached — giving up.",
