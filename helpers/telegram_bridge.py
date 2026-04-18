@@ -1491,10 +1491,12 @@ async def stop_chat_bridge():
     if _bot_instance:
         _bot_instance._running = False
 
-    # Give the thread up to 15 s to finish its shutdown sequence
-    if _bot_thread and _bot_thread.is_alive():
-        _bot_thread.join(timeout=15)
-        if _bot_thread.is_alive():
+    # Snapshot to local to guard against concurrent _cleanup_dead_bot() setting
+    # _bot_thread = None between the is_alive() check and the subsequent call.
+    thread = _bot_thread
+    if thread and thread.is_alive():
+        thread.join(timeout=15)
+        if thread.is_alive():
             logger.warning("Bridge thread did not exit within 15 s; proceeding anyway.")
 
     _bot_instance = None
