@@ -277,12 +277,24 @@
 
                             <div class="field">
                                 <div class="field-label">
-                                    <div class="field-title">Processing (🤔)</div>
-                                    <div class="field-description">Shown while the agent is thinking.</div>
+                                    <div class="field-title">Queued (🕐)</div>
+                                    <div class="field-description">Shown when the message is waiting because the agent is busy with another. Leave empty to disable.</div>
+                                </div>
+                                <div class="field-control">
+                                    <input type="text" x-model="config.reactions.queued_react"
+                                        x-init="if (config.reactions.queued_react === undefined) config.reactions.queued_react = '🕐'"
+                                        style="width: 60px; text-align: center;" maxlength="8" />
+                                </div>
+                            </div>
+
+                            <div class="field">
+                                <div class="field-label">
+                                    <div class="field-title">Processing (🧠)</div>
+                                    <div class="field-description">Shown while the agent is actively thinking.</div>
                                 </div>
                                 <div class="field-control">
                                     <input type="text" x-model="config.reactions.processing_react"
-                                        x-init="if (!config.reactions.processing_react) config.reactions.processing_react = '🤔'"
+                                        x-init="if (!config.reactions.processing_react) config.reactions.processing_react = '🧠'"
                                         style="width: 60px; text-align: center;" maxlength="8" />
                                 </div>
                             </div>

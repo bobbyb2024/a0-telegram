@@ -59,19 +59,26 @@ def _conversation_key(
 
 
 async def _safe_react(bot, chat_id: str, message_id: int, emoji: str, config: dict):
-    """Fire-and-forget reaction setter. Never raises."""
+    """Fire-and-forget reaction setter. Never raises.
+
+    PTB v21 accepts a string or sequence of strings for `reaction` and wraps
+    each into a ReactionTypeEmoji internally. Passing raw dicts triggers
+    AttributeError because PTB calls `.to_dict()` on each element.
+    """
+    if not emoji:
+        return
     try:
         await bot.set_message_reaction(
             chat_id=chat_id,
             message_id=message_id,
-            reaction=[{"type": "emoji", "emoji": emoji}],
+            reaction=[emoji],
         )
     except Exception as e:
         err = str(e).lower()
-        if "not modified" in err or "bad request" in err or "reaction" in err:
-            logger.debug(f"Reaction {emoji} not supported in chat {chat_id}: {e}")
+        if "not modified" in err or "reaction is not valid" in err or "reactions are not enabled" in err:
+            logger.debug(f"Reaction {emoji!r} not supported in chat {chat_id}: {e}")
         else:
-            logger.debug(f"Reaction failed ({type(e).__name__}): {e}")
+            logger.warning(f"Reaction {emoji!r} failed in chat {chat_id} ({type(e).__name__}): {e}")
 
 
 # Singleton bot instance and its dedicated event loop thread
@@ -1066,15 +1073,26 @@ class ChatBridgeBot:
         )
 
         # TRACK 12: Concurrency semaphore
-        self._dbg("step 15 semaphore", "waiting to acquire concurrency semaphore")
-        async with self._get_semaphore():
-            self._dbg("step 15 acquired", "semaphore acquired; processing starts")
-            # TRACK 1: React 🤔 (thinking)
-            if reactions_config.get("enabled", True):
-                self._dbg("step 16 react 🤔", "posting processing_react")
+        sem = self._get_semaphore()
+        # If we're about to block (all slots in use), surface a queued/busy
+        # reaction so the user sees their message is acknowledged but waiting.
+        if reactions_config.get("enabled", True) and sem.locked():
+            queued_emoji = reactions_config.get("queued_react", "🕐")
+            if queued_emoji:
+                self._dbg("step 14b react queued", f"semaphore full; posting queued_react {queued_emoji!r}")
                 asyncio.create_task(_safe_react(
                     context_obj.bot, chat_id, message.message_id,
-                    reactions_config.get("processing_react", "🤔"), config
+                    queued_emoji, config
+                ))
+        self._dbg("step 15 semaphore", "waiting to acquire concurrency semaphore")
+        async with sem:
+            self._dbg("step 15 acquired", "semaphore acquired; processing starts")
+            # TRACK 1: React 🧠 (thinking)
+            if reactions_config.get("enabled", True):
+                self._dbg("step 16 react 🧠", "posting processing_react")
+                asyncio.create_task(_safe_react(
+                    context_obj.bot, chat_id, message.message_id,
+                    reactions_config.get("processing_react", "🧠"), config
                 ))
 
             try:
