@@ -293,10 +293,69 @@ class ChatBridgeBot:
     def _session_key(self, user_id: str, chat_id: str) -> str:
         return f"{user_id}:{chat_id}"
 
+    def _ensure_project_mapping(self, conv_key: str, chat_id: str, thread_id, message):
+        """Register a project mapping for this conversation if one doesn't exist.
+
+        Forum topics get a mapping created in `_on_forum_topic_created`. This
+        helper covers every other case (DMs, the general topic, group chats,
+        pre-existing topics) so the dashboard shows a unified list of all
+        active conversations and their project IDs.
+
+        Idempotent — only writes when no mapping exists for the key.
+        """
+        try:
+            if get_topic_project(conv_key):
+                return  # already mapped
+
+            # Build a human-readable name based on the chat type
+            chat = getattr(message, "chat", None)
+            chat_type = getattr(chat, "type", "private") if chat else "private"
+            if chat_type == "private":
+                first = getattr(chat, "first_name", "") or ""
+                last = getattr(chat, "last_name", "") or ""
+                uname = getattr(chat, "username", "") or ""
+                name = (f"DM: {first} {last}".strip()
+                        or (f"DM: @{uname}" if uname else f"DM: {chat_id}"))
+            elif thread_id:
+                # Topic in a supergroup forum (general or specific)
+                title = getattr(chat, "title", "") or chat_id
+                name = f"{title} / topic {thread_id}"
+            else:
+                name = getattr(chat, "title", "") or f"Chat {chat_id}"
+
+            # Use the existing context_id (if any) as the project_id so the
+            # mapping points at the same A0 context the bridge is using.
+            project_id = get_context_id(conv_key) or conv_key
+            set_topic_project(conv_key, project_id, name, auto_created=True)
+            logger.info(
+                "Auto-mapped conversation %s → project %s (%s)",
+                conv_key, project_id, name,
+            )
+        except Exception as e:
+            # Never let dashboard bookkeeping break message handling
+            logger.debug("_ensure_project_mapping failed for %s: %s", conv_key, e)
+
     def _is_elevated(self, user_id: str, chat_id: str) -> bool:
-        """Check if a user has an active elevated session in this chat."""
+        """Return True when this user/chat should route through the full agent loop.
+
+        When ``chat_bridge.full_agent_mode`` is true (the default since v1.3),
+        Telegram is treated as a frontend to Agent Zero — every allowed user
+        gets the full agent loop (tools, file access, project context) with
+        responses visible in the web UI. The chat_list and allowed_users config
+        are the security gates.
+
+        When ``full_agent_mode`` is false, the legacy two-mode model applies:
+        users are restricted (no tools) until they ``!auth <key>``.
+        """
         config = self._get_config()
-        if not config.get("chat_bridge", {}).get("allow_elevated", False):
+        bridge_cfg = config.get("chat_bridge", {})
+
+        # New unified mode: everyone allowed gets the full agent loop
+        if bridge_cfg.get("full_agent_mode", True):
+            return True
+
+        # Legacy: requires explicit !auth elevation
+        if not bridge_cfg.get("allow_elevated", False):
             return False
 
         key = self._session_key(user_id, chat_id)
@@ -304,7 +363,7 @@ class ChatBridgeBot:
         if not session:
             return False
 
-        timeout = config.get("chat_bridge", {}).get("session_timeout", 300)
+        timeout = bridge_cfg.get("session_timeout", 300)
         # timeout=0 means never expire
         if timeout > 0 and time.monotonic() - session["at"] > timeout:
             del self._elevated_sessions[key]
@@ -373,11 +432,22 @@ class ChatBridgeBot:
 
         # --- !bridge-status / !status ---
         if text.lower() in ("!bridge-status", "!status"):
-            if self._is_elevated(user_id, chat_id):
+            config = self._get_config()
+            bridge_cfg = config.get("chat_bridge", {})
+            full_mode = bridge_cfg.get("full_agent_mode", True)
+
+            if full_mode:
+                # New default — every allowed user always has full access
+                await message.reply_text(
+                    "Mode: *Full Agent* (web-UI parity)\n"
+                    "All messages route through the full Agent Zero loop with "
+                    "tools, file access, and project context. No `!auth` needed.",
+                    parse_mode="Markdown",
+                )
+            elif self._is_elevated(user_id, chat_id):
                 session = self._elevated_sessions[self._session_key(user_id, chat_id)]
                 elapsed = int(time.monotonic() - session["at"])
-                config = self._get_config()
-                timeout = config.get("chat_bridge", {}).get("session_timeout", 300)
+                timeout = bridge_cfg.get("session_timeout", 300)
                 if timeout > 0:
                     remaining = max(0, timeout - elapsed)
                     expire_info = f"Session expires in {remaining // 60}m {remaining % 60}s"
@@ -389,8 +459,7 @@ class ChatBridgeBot:
                     parse_mode="Markdown",
                 )
             else:
-                config = self._get_config()
-                elevated_available = config.get("chat_bridge", {}).get("allow_elevated", False)
+                elevated_available = bridge_cfg.get("allow_elevated", False)
                 if elevated_available:
                     await message.reply_text(
                         "Mode: *Restricted* (chat only). Use `!auth <key>` to elevate.",
@@ -519,6 +588,16 @@ class ChatBridgeBot:
         chat_id = str(message.chat_id)
         thread_id = getattr(message, "message_thread_id", None)
         user_id = str(message.from_user.id) if message.from_user else "unknown"
+
+        # INFO-level visibility for every received message — makes silent drops
+        # diagnosable from the live log without enabling DEBUG.
+        chat_type = getattr(message.chat, "type", "?") if message.chat else "?"
+        username = getattr(message.from_user, "username", None) if message.from_user else None
+        preview = (message.text or "")[:60].replace("\n", " ") if message.text else "<non-text>"
+        logger.info(
+            "MSG recv: chat=%s type=%s thread=%s user=%s(%s) text=%r",
+            chat_id, chat_type, thread_id, user_id, username or "?", preview,
+        )
 
         # Store message for telegram_read tool access
         msg_text = (message.text or "").strip()
@@ -662,6 +741,18 @@ class ChatBridgeBot:
                 # Touch topic last-active timestamp
                 if thread_id:
                     touch_topic(_topic_key(chat_id, thread_id))
+
+                # Ensure a project mapping exists for this conversation so
+                # DMs, the general topic, and pre-existing topics show up in
+                # the dashboard alongside auto-created topic projects.
+                self._ensure_project_mapping(
+                    conv_key2, chat_id, thread_id, message,
+                )
+
+                logger.info(
+                    "MSG route: conv_key=%s mode=%s",
+                    conv_key2, "full-agent" if is_elevated else "restricted",
+                )
 
                 if is_elevated:
                     response_text = await self._get_elevated_response(
@@ -1307,22 +1398,35 @@ class ChatBridgeBot:
     async def _cmd_help(self, update, context_obj):
         try:
             config = self._get_config()
-            elevated_enabled = config.get("chat_bridge", {}).get("allow_elevated", False)
+            bridge_cfg = config.get("chat_bridge", {})
+            full_mode = bridge_cfg.get("full_agent_mode", True)
+            elevated_enabled = bridge_cfg.get("allow_elevated", False)
             user_id = str(update.message.from_user.id) if update.message and update.message.from_user else "unknown"
             chat_id = str(update.message.chat_id) if update.message else "unknown"
             is_elevated = self._is_elevated(user_id, chat_id)
-            mode = "Elevated (full agent access)" if is_elevated else "Restricted (chat only)"
-            elev_hint = "\n/auth &lt;key&gt; — Elevate to full Agent Zero access" if elevated_enabled and not is_elevated else ""
+
+            if full_mode:
+                mode = "Full Agent (web-UI parity)"
+            else:
+                mode = "Elevated (full agent access)" if is_elevated else "Restricted (chat only)"
+
+            # Only suggest /auth when legacy elevated mode is on AND user isn't elevated
+            elev_hint = ""
+            if not full_mode and elevated_enabled and not is_elevated:
+                elev_hint = "\n/auth &lt;key&gt; — Elevate to full Agent Zero access"
+
             help_text = (
                 f"<b>Telegram Bridge — Available Commands</b>\n\n"
-                f"Current mode: <b>{mode}</b>\n"
+                f"Current mode: <b>{mode}</b>"
                 f"{elev_hint}\n"
-                f"/deauth — End elevated session\n"
-                f"/status — Show session mode and expiry\n"
+                f"/status — Show current mode\n"
                 f"/newcontext — Clear conversation history\n"
                 f"/cancel — Cancel current in-progress task\n"
                 f"/help — Show this message"
             )
+            if not full_mode:
+                help_text += "\n/deauth — End elevated session"
+
             await update.message.reply_text(help_text, parse_mode="HTML")
         except Exception as e:
             logger.error("/help handler error: %s: %s", type(e).__name__, e, exc_info=True)

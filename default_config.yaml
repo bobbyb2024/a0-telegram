@@ -32,9 +32,17 @@ chat_bridge:
   # Empty list = allow all users. Get IDs via @userinfobot on Telegram.
   allowed_users: []
 
-  # Elevated mode: allows authenticated users to access the full Agent Zero
-  # agent loop (with tools, code execution, file access, etc.) via Telegram.
-  # Default is restricted mode (conversation only, no tools).
+  # Full agent mode (NEW DEFAULT, v1.3+): treat Telegram as a frontend to
+  # Agent Zero — every allowed user gets the full agent loop (tools, file
+  # access, project context per topic) with responses visible in the web UI.
+  # The chat_list (managed via telegram_chat tool) and allowed_users below
+  # are the only security gates. Set to false to fall back to the legacy
+  # restricted/elevated two-mode model that requires `!auth <key>`.
+  full_agent_mode: true
+
+  # Elevated mode (legacy, only used when full_agent_mode: false):
+  # Allows authenticated users to access the full Agent Zero agent loop
+  # via `!auth <key>` from Telegram.
   allow_elevated: false
   # Auth key for elevated mode. Auto-generated on first use if left empty.
   # Shown in WebUI settings. Required to authenticate via !auth <key> in Telegram.
