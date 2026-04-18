@@ -1,234 +1,259 @@
 <div class="telegram-dashboard" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 16px;">
-    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color, #e0e0e0);">
-        <h3 style="margin: 0; color: #0088cc;">Telegram Integration</h3>
-        <span data-tgm="status-badge" style="padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: #fce4ec; color: #c62828;">Checking...</span>
-    </div>
+    <template x-if="$store.tgMain">
+        <div>
+            <!-- Header + connection status badge -->
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color, #e0e0e0);">
+                <h3 style="margin: 0; color: #0088cc;">Telegram Integration</h3>
+                <span
+                    :style="'padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: ' + $store.tgMain.statusBg + '; color: ' + $store.tgMain.statusColor + ';'"
+                    x-text="$store.tgMain.statusText"></span>
+            </div>
 
-    <!-- Privacy mode advisory (shown when privacy mode is ON) -->
-    <div data-tgm="privacy-advisory" style="display:none; background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 10px; margin-bottom: 14px; font-size: 11px; color: #e65100; line-height: 1.5;">
-        <strong>&#9888; Privacy Mode ON:</strong> <span data-tgm="privacy-advisory-text"></span>
-    </div>
+            <!-- Privacy mode advisory (shown when privacy mode is ON) -->
+            <div x-show="$store.tgMain.privacyMode"
+                 style="background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 10px; margin-bottom: 14px; font-size: 11px; color: #e65100; line-height: 1.5;">
+                <strong>&#9888; Privacy Mode ON:</strong>
+                <span x-text="$store.tgMain.privacyAdvisory"></span>
+            </div>
 
-    <!-- Stats row -->
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin-bottom: 16px;">
-        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
-            <div style="font-size: 20px; font-weight: 700; color: #0088cc;" data-tgm="chat-count">-</div>
-            <div style="font-size: 11px; color: var(--text-secondary, #888);">Bridge Chats</div>
-        </div>
-        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
-            <div style="font-size: 20px; font-weight: 700; color: #6a1b9a;" data-tgm="topic-count">-</div>
-            <div style="font-size: 11px; color: var(--text-secondary, #888);">Topics</div>
-        </div>
-        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
-            <div style="font-size: 20px; font-weight: 700; color: #2e7d32;" data-tgm="restart-count">-</div>
-            <div style="font-size: 11px; color: var(--text-secondary, #888);">Restarts</div>
-        </div>
-        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
-            <div style="font-size: 13px; font-weight: 600; color: #37474f;" data-tgm="webhook-mode">-</div>
-            <div style="font-size: 11px; color: var(--text-secondary, #888);">Update mode</div>
-        </div>
-    </div>
+            <!-- Stats row -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin-bottom: 16px;">
+                <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+                    <div style="font-size: 20px; font-weight: 700; color: #0088cc;" x-text="$store.tgMain.chatCount"></div>
+                    <div style="font-size: 11px; color: var(--text-secondary, #888);">Bridge Chats</div>
+                </div>
+                <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+                    <div style="font-size: 20px; font-weight: 700; color: #6a1b9a;" x-text="$store.tgMain.topicCount"></div>
+                    <div style="font-size: 11px; color: var(--text-secondary, #888);">Topics</div>
+                </div>
+                <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+                    <div style="font-size: 20px; font-weight: 700; color: #2e7d32;" x-text="$store.tgMain.restartCount"></div>
+                    <div style="font-size: 11px; color: var(--text-secondary, #888);">Restarts</div>
+                </div>
+                <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+                    <div style="font-size: 13px; font-weight: 600; color: #37474f;" x-text="$store.tgMain.webhookMode"></div>
+                    <div style="font-size: 11px; color: var(--text-secondary, #888);">Update mode</div>
+                </div>
+            </div>
 
-    <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
-        <button onclick="window._tgMain.test()" style="background: #0088cc; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">Test Connection</button>
-    </div>
+            <!-- Test Connection -->
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;">
+                <button @click="$store.tgMain.test()"
+                        style="background: #0088cc; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                    Test Connection
+                </button>
+            </div>
 
-    <!-- Chat Bridge Section -->
-    <div style="padding-top: 12px; border-top: 1px solid var(--border-color, #e0e0e0);">
-        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-            <h4 style="margin: 0; color: #0088cc;">Chat Bridge</h4>
-            <span data-tgm="bridge-status" style="padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 600; background: #f5f5f5; color: #888;">Unknown</span>
-        </div>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
-            <button onclick="window._tgMain.bridge('start', this)" style="background: #43a047; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">Start Bridge</button>
-            <button onclick="window._tgMain.bridge('stop', this)" style="background: #e53935; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">Stop Bridge</button>
-            <button onclick="window._tgMain.bridge('restart', this)" style="background: #ff9800; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">Restart Bridge</button>
-            <button onclick="window._tgMain.bridge('status', this)" style="background: var(--bg-secondary, #f0f0f0); color: var(--text-primary, #333); border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">Refresh Status</button>
-        </div>
-        <div data-tgm="bridge-info" style="font-size: 11px; color: var(--text-secondary, #888);"></div>
-    </div>
+            <!-- Chat Bridge Section -->
+            <div style="padding-top: 12px; border-top: 1px solid var(--border-color, #e0e0e0);">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <h4 style="margin: 0; color: #0088cc;">Chat Bridge</h4>
+                    <span
+                        :style="'padding: 2px 8px; border-radius: 8px; font-size: 10px; font-weight: 600; background: ' + $store.tgMain.bridgeStatusBg + '; color: ' + $store.tgMain.bridgeStatusColor + ';'"
+                        x-text="$store.tgMain.bridgeStatusText"></span>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <button @click="$store.tgMain.bridge('start')"
+                            style="background: #43a047; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                        Start Bridge
+                    </button>
+                    <button @click="$store.tgMain.bridge('stop')"
+                            style="background: #e53935; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                        Stop Bridge
+                    </button>
+                    <button @click="$store.tgMain.bridge('restart')"
+                            style="background: #ff9800; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                        Restart Bridge
+                    </button>
+                    <button @click="$store.tgMain.bridge('status')"
+                            style="background: var(--bg-secondary, #f0f0f0); color: var(--text-primary, #333); border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;">
+                        Refresh Status
+                    </button>
+                </div>
+            </div>
 
-    <!-- Forum Topics Section -->
-    <div style="padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--border-color, #e0e0e0);">
-        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-            <h4 style="margin: 0; color: #6a1b9a;">Forum Topics</h4>
-            <button onclick="window._tgMain.loadTopics(this)" style="background: var(--bg-secondary, #f0f0f0); color: var(--text-primary, #333); border: none; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Load</button>
+            <!-- Forum Topics Section -->
+            <div style="padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--border-color, #e0e0e0);">
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                    <h4 style="margin: 0; color: #6a1b9a;">Forum Topics</h4>
+                    <button @click="$store.tgMain.loadTopics()"
+                            style="background: var(--bg-secondary, #f0f0f0); color: var(--text-primary, #333); border: none; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">
+                        Load
+                    </button>
+                </div>
+                <div style="font-size: 11px; color: var(--text-secondary, #888);">
+                    <span x-show="!$store.tgMain.topicsData && !$store.tgMain.topicsEmpty && !$store.tgMain.topicsError">
+                        Click Load to show topic mappings.
+                    </span>
+                    <span x-show="$store.tgMain.topicsEmpty">
+                        No forum topic mappings configured.
+                    </span>
+                    <span x-show="$store.tgMain.topicsError"
+                          x-text="$store.tgMain.topicsError"
+                          style="color: #c62828;"></span>
+                    <template x-if="$store.tgMain.topicsData">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 6px;">
+                            <thead>
+                                <tr>
+                                    <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border-color, #e0e0e0); color: var(--text-secondary, #888);">Topic Key</th>
+                                    <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border-color, #e0e0e0); color: var(--text-secondary, #888);">Name</th>
+                                    <th style="text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border-color, #e0e0e0); color: var(--text-secondary, #888);">Project ID</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="entry in $store.tgMain.topicEntries()" :key="entry[0]">
+                                    <tr>
+                                        <td x-text="entry[0]" style="padding: 3px 6px; font-family: monospace; color: #37474f;"></td>
+                                        <td x-text="entry[1].name || '\u2014'" style="padding: 3px 6px;"></td>
+                                        <td x-text="entry[1].project_id || '\u2014'" style="padding: 3px 6px; color: #6a1b9a;"></td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </template>
+                </div>
+            </div>
         </div>
-        <div data-tgm="topics-list" style="font-size: 11px; color: var(--text-secondary, #888);">
-            Click Load to show topic mappings.
-        </div>
-    </div>
+    </template>
 </div>
 
-<script>
-(function() {
-    function fetchApi(url, opts) { return (globalThis.fetchApi || fetch)(url, opts); }
-    var API_TEST = '/api/plugins/telegram/telegram_test';
-    var API_BRIDGE = '/api/plugins/telegram/telegram_bridge_api';
+<script type="module">
+import { createStore } from '/js/AlpineStore.js';
 
-    function $(sel) { return document.querySelector('[data-tgm="' + sel + '"]'); }
+createStore('tgMain', {
+    // Connection status badge
+    statusText: 'Checking...',
+    statusBg: '#fce4ec',
+    statusColor: '#c62828',
 
-    function setBridgeBadge(status) {
-        var badge = $('bridge-status');
-        var chatCount = $('chat-count');
-        var topicCount = $('topic-count');
-        var restartCount = $('restart-count');
-        var webhookMode = $('webhook-mode');
+    // Privacy advisory
+    privacyMode: false,
+    privacyAdvisory: '',
 
-        if (chatCount && status.chat_count !== undefined) chatCount.textContent = status.chat_count;
-        if (topicCount && status.topic_count !== undefined) topicCount.textContent = status.topic_count;
-        if (restartCount && status.restart_count !== undefined) restartCount.textContent = status.restart_count;
-        if (webhookMode) webhookMode.textContent = status.webhook_mode ? 'Webhook' : 'Polling';
+    // Stats grid
+    chatCount: '-',
+    topicCount: '-',
+    restartCount: '-',
+    webhookMode: '-',
 
-        if (!badge) return;
-        if (status.running && status.status === 'connected') {
-            badge.textContent = 'Connected' + (status.user ? ' as ' + status.user : '');
-            badge.style.background = '#e8f5e9'; badge.style.color = '#2e7d32';
-        } else if (status.running) {
-            badge.textContent = status.status || 'Connecting...';
-            badge.style.background = '#fff3e0'; badge.style.color = '#e65100';
+    // Bridge status badge
+    bridgeStatusText: 'Unknown',
+    bridgeStatusBg: '#f5f5f5',
+    bridgeStatusColor: '#888',
+
+    // Forum topics panel
+    topicsData: null,
+    topicsEmpty: false,
+    topicsError: '',
+
+    // ----------------------------------------------------------------
+    // Internal helpers
+    // ----------------------------------------------------------------
+    _api(url, body) {
+        return (globalThis.fetchApi || fetch)(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+    },
+
+    _applyBridgeStatus(data) {
+        if (data.chat_count !== undefined) this.chatCount = data.chat_count;
+        if (data.topic_count !== undefined) this.topicCount = data.topic_count;
+        if (data.restart_count !== undefined) this.restartCount = data.restart_count;
+        this.webhookMode = data.webhook_mode ? 'Webhook' : 'Polling';
+
+        if (data.running && data.status === 'connected') {
+            this.bridgeStatusText = 'Connected' + (data.user ? ' as ' + data.user : '');
+            this.bridgeStatusBg = '#e8f5e9';
+            this.bridgeStatusColor = '#2e7d32';
+        } else if (data.running) {
+            this.bridgeStatusText = data.status || 'Connecting...';
+            this.bridgeStatusBg = '#fff3e0';
+            this.bridgeStatusColor = '#e65100';
         } else {
-            badge.textContent = status.status || 'Stopped';
-            badge.style.background = '#f5f5f5'; badge.style.color = '#888';
+            this.bridgeStatusText = data.status || 'Stopped';
+            this.bridgeStatusBg = '#f5f5f5';
+            this.bridgeStatusColor = '#888';
         }
-    }
+    },
 
-    async function bridgeAction(action, btn) {
-        if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
-        var info = $('bridge-info');
+    // ----------------------------------------------------------------
+    // Actions
+    // ----------------------------------------------------------------
+    async test() {
+        this.statusText = 'Testing...';
+        this.statusBg = '#fff3e0';
+        this.statusColor = '#e65100';
+        this.privacyMode = false;
         try {
-            var resp = await fetchApi(API_BRIDGE, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: action})
-            });
-            var data = await resp.json();
-            setBridgeBadge(data);
-            if (info) {
-                if (data.ok) {
-                    info.textContent = data.message || '';
-                    info.style.color = '#2e7d32';
-                } else {
-                    info.textContent = data.error || 'Unknown error';
-                    info.style.color = '#c62828';
-                }
-                setTimeout(function() { info.textContent = ''; }, 5000);
-            }
-        } catch (e) {
-            if (info) { info.textContent = 'API unavailable'; info.style.color = '#c62828'; }
-        }
-        if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
-    }
-
-    async function testConnection() {
-        var badge = $('status-badge');
-        var advisory = $('privacy-advisory');
-        var advisoryText = $('privacy-advisory-text');
-        if (!badge) return;
-        badge.textContent = 'Testing...';
-        badge.style.background = '#fff3e0'; badge.style.color = '#e65100';
-        try {
-            var resp = await fetchApi(API_TEST, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: '{}'
-            });
-            var data = await resp.json();
+            const resp = await this._api('/api/plugins/telegram/telegram_test', {});
+            const data = await resp.json();
             if (data.ok) {
-                badge.textContent = 'Connected as ' + data.user;
-                badge.style.background = '#e8f5e9'; badge.style.color = '#2e7d32';
-                if (advisory && advisoryText) {
-                    if (data.privacy_mode && data.privacy_advisory) {
-                        advisoryText.textContent = data.privacy_advisory;
-                        advisory.style.display = '';
-                    } else {
-                        advisory.style.display = 'none';
-                    }
+                this.statusText = 'Connected as ' + data.user;
+                this.statusBg = '#e8f5e9';
+                this.statusColor = '#2e7d32';
+                if (data.privacy_mode && data.privacy_advisory) {
+                    this.privacyMode = true;
+                    this.privacyAdvisory = data.privacy_advisory;
                 }
             } else {
-                badge.textContent = data.error || 'Error';
-                badge.style.background = '#fce4ec'; badge.style.color = '#c62828';
-                if (advisory) advisory.style.display = 'none';
+                this.statusText = data.error || 'Error';
+                this.statusBg = '#fce4ec';
+                this.statusColor = '#c62828';
+                toastFrontendError(data.error || 'Connection test failed');
             }
-        } catch (e) {
-            badge.textContent = 'API unavailable';
-            badge.style.background = '#fce4ec'; badge.style.color = '#c62828';
+        } catch {
+            this.statusText = 'API unavailable';
+            this.statusBg = '#fce4ec';
+            this.statusColor = '#c62828';
+            toastFrontendError('Telegram API unavailable');
         }
-    }
+    },
 
-    function buildTopicsTable(topics) {
-        var container = $('topics-list');
-        if (!container) return;
-        // Clear existing content using safe DOM operations
-        while (container.firstChild) { container.removeChild(container.firstChild); }
-
-        var table = document.createElement('table');
-        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:11px;';
-
-        // Header
-        var thead = document.createElement('thead');
-        var hrow = document.createElement('tr');
-        ['Topic Key', 'Name', 'Project ID'].forEach(function(label) {
-            var th = document.createElement('th');
-            th.textContent = label;
-            th.style.cssText = 'text-align:left;padding:3px 6px;border-bottom:1px solid var(--border-color,#e0e0e0);color:var(--text-secondary,#888);';
-            hrow.appendChild(th);
-        });
-        thead.appendChild(hrow);
-        table.appendChild(thead);
-
-        // Body rows
-        var tbody = document.createElement('tbody');
-        Object.keys(topics).forEach(function(key) {
-            var info = topics[key];
-            var row = document.createElement('tr');
-
-            var tdKey = document.createElement('td');
-            tdKey.textContent = key;
-            tdKey.style.cssText = 'padding:3px 6px;font-family:monospace;color:#37474f;';
-
-            var tdName = document.createElement('td');
-            tdName.textContent = info.name || '\u2014';
-            tdName.style.cssText = 'padding:3px 6px;';
-
-            var tdProject = document.createElement('td');
-            tdProject.textContent = info.project_id || '\u2014';
-            tdProject.style.cssText = 'padding:3px 6px;color:#6a1b9a;';
-
-            row.appendChild(tdKey);
-            row.appendChild(tdName);
-            row.appendChild(tdProject);
-            tbody.appendChild(row);
-        });
-        table.appendChild(tbody);
-        container.appendChild(table);
-    }
-
-    async function loadTopics(btn) {
-        if (btn) { btn.disabled = true; }
-        var container = $('topics-list');
-        if (!container) { if (btn) btn.disabled = false; return; }
+    async bridge(action) {
         try {
-            var resp = await fetchApi(API_BRIDGE, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({action: 'list_topics'})
-            });
-            var data = await resp.json();
-            if (!data.ok) {
-                container.textContent = data.error || 'Failed to load topics.';
-            } else if (!data.count) {
-                container.textContent = 'No forum topic mappings configured.';
+            const resp = await this._api('/api/plugins/telegram/telegram_bridge_api', { action });
+            const data = await resp.json();
+            this._applyBridgeStatus(data);
+            if (data.ok) {
+                if (data.message) toastFrontendSuccess(data.message);
             } else {
-                buildTopicsTable(data.topics);
+                toastFrontendError(data.error || 'Unknown error');
             }
-        } catch (e) {
-            container.textContent = 'API unavailable.';
+        } catch {
+            toastFrontendError('API unavailable');
         }
-        if (btn) { btn.disabled = false; }
-    }
+    },
 
-    window._tgMain = { test: testConnection, bridge: bridgeAction, loadTopics: loadTopics };
-    setTimeout(function() { testConnection(); bridgeAction('status'); }, 50);
-})();
+    async loadTopics() {
+        this.topicsData = null;
+        this.topicsEmpty = false;
+        this.topicsError = '';
+        try {
+            const resp = await this._api('/api/plugins/telegram/telegram_bridge_api', { action: 'list_topics' });
+            const data = await resp.json();
+            if (!data.ok) {
+                this.topicsError = data.error || 'Failed to load topics.';
+            } else if (!data.count) {
+                this.topicsEmpty = true;
+            } else {
+                this.topicsData = data.topics;
+            }
+        } catch {
+            this.topicsError = 'API unavailable.';
+        }
+    },
+
+    topicEntries() {
+        return this.topicsData ? Object.entries(this.topicsData) : [];
+    },
+
+    // ----------------------------------------------------------------
+    // Lifecycle
+    // ----------------------------------------------------------------
+    init() {
+        setTimeout(() => { this.test(); this.bridge('status'); }, 50);
+    },
+});
 </script>
