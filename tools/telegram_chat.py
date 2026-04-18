@@ -118,38 +118,60 @@ class TelegramChat(Tool):
             return Response(message=f"Error restarting: {type(e).__name__}", break_loop=False)
 
     def _add_chat(self) -> Response:
-        """Add a chat to the bridge."""
+        """Add a chat (or topic) to the bridge."""
         chat_id = self.args.get("chat_id", "")
         label = self.args.get("label", "")
+        thread_id = self.args.get("thread_id", "")
 
         try:
             chat_id = validate_chat_id(chat_id, "chat_id")
         except ValueError as e:
             return Response(message=f"Error: {e}", break_loop=False)
 
-        add_chat(chat_id, label)
-        msg = f"Chat {chat_id} added to bridge"
-        if label:
-            msg += f" ({label})"
-        msg += ". Messages in this chat will be routed to Agent Zero's LLM."
+        if thread_id:
+            try:
+                tid = int(thread_id)
+            except ValueError:
+                return Response(message="Error: thread_id must be an integer.", break_loop=False)
+            key = f"{chat_id}:topic:{tid}"
+            add_chat(key, label or f"Topic {tid}")
+            msg = f"Topic {tid} in chat {chat_id} added to bridge"
+            if label:
+                msg += f" ({label})"
+            msg += ". Messages in this topic thread will be routed to Agent Zero."
+        else:
+            add_chat(chat_id, label)
+            msg = f"Chat {chat_id} added to bridge"
+            if label:
+                msg += f" ({label})"
+            msg += ". Messages in this chat will be routed to Agent Zero's LLM."
         return Response(message=msg, break_loop=False)
 
     def _remove_chat(self) -> Response:
-        """Remove a chat from the bridge."""
+        """Remove a chat (or topic) from the bridge."""
         chat_id = self.args.get("chat_id", "")
+        thread_id = self.args.get("thread_id", "")
         try:
             chat_id = validate_chat_id(chat_id, "chat_id")
         except ValueError as e:
             return Response(message=f"Error: {e}", break_loop=False)
 
-        remove_chat(chat_id)
-        return Response(
-            message=f"Chat {chat_id} removed from bridge.",
-            break_loop=False,
-        )
+        if thread_id:
+            try:
+                key = f"{chat_id}:topic:{int(thread_id)}"
+            except ValueError:
+                return Response(message="Error: thread_id must be an integer.", break_loop=False)
+            remove_chat(key)
+            return Response(message=f"Topic {thread_id} in chat {chat_id} removed from bridge.", break_loop=False)
+        else:
+            remove_chat(chat_id)
+            return Response(
+                message=f"Chat {chat_id} removed from bridge.",
+                break_loop=False,
+            )
 
     def _list_chats(self) -> Response:
-        """List all bridge chats."""
+        """List all bridge chats, grouping topics under their parent chat."""
         chats = get_chat_list()
         if not chats:
             return Response(
@@ -157,11 +179,34 @@ class TelegramChat(Tool):
                 break_loop=False,
             )
 
-        lines = [f"Bridge chats ({len(chats)}):"]
+        # Separate plain chats from topic keys
+        plain_chats = {}
+        topic_chats = {}
         for cid, info in chats.items():
+            if ":topic:" in cid:
+                base, tid = cid.split(":topic:", 1)
+                topic_chats.setdefault(base, {})[tid] = info
+            else:
+                plain_chats[cid] = info
+
+        lines = [f"Bridge chats ({len(chats)} total):"]
+        for cid, info in plain_chats.items():
             label = info.get("label", cid)
             added = info.get("added_at", "unknown")
-            lines.append(f"  - {label} (ID: {cid}, added: {added})")
+            topics_for_chat = topic_chats.get(cid, {})
+            topic_note = f" [{len(topics_for_chat)} topic(s)]" if topics_for_chat else ""
+            lines.append(f"  - {label} (ID: {cid}, added: {added}{topic_note})")
+            for tid, tinfo in topics_for_chat.items():
+                tlabel = tinfo.get("label", f"Topic {tid}")
+                lines.append(f"      • {tlabel} (thread_id: {tid})")
+
+        # Topics under chats not in plain_chats
+        for base, topics in topic_chats.items():
+            if base not in plain_chats:
+                lines.append(f"  - Supergroup {base} (topics only):")
+                for tid, tinfo in topics.items():
+                    tlabel = tinfo.get("label", f"Topic {tid}")
+                    lines.append(f"      • {tlabel} (thread_id: {tid})")
 
         status = get_bot_status()
         if status.get("running"):

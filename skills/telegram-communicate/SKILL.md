@@ -10,6 +10,10 @@ triggers:
   - "send telegram message"
   - "reply on telegram"
   - "post to telegram"
+  - "send message to a topic thread"
+  - "create a forum topic"
+  - "send a poll"
+  - "send a sticker"
 allowed_tools:
   - telegram_send
   - telegram_read
@@ -47,3 +51,15 @@ Send messages and interact in Telegram chats via the bot account.
 
 6. **Pin a message**:
    `telegram_manage` with `chat_id: CHAT_ID`, `action: pin`, `message_id: MSG_ID`
+
+7. **Send message to a forum topic thread**:
+   `telegram_send` with `action: send`, `chat_id: CHAT_ID`, `content: TEXT`, `message_thread_id: THREAD_ID`
+
+8. **Create a forum topic**:
+   `telegram_manage` with `action: create_topic`, `chat_id: CHAT_ID`, `name: TOPIC_NAME`
+
+9. **Send a poll**:
+   `telegram_send` with `action: poll`, `chat_id: CHAT_ID`, `content: QUESTION`, `options: ["A", "B", "C"]`
+
+10. **Send a sticker**:
+    `telegram_send` with `action: sticker`, `chat_id: CHAT_ID`, `sticker: FILE_ID`

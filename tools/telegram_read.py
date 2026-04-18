@@ -27,8 +27,8 @@ def _load_chat_registry() -> dict:
 def _save_chat_registry(chats: dict):
     path = _chat_registry_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(chats, f, indent=2)
+    from usr.plugins.telegram.helpers.sanitize import secure_write_json
+    secure_write_json(path, chats)
 
 
 def _update_chat_registry(updates: list) -> dict:
@@ -50,12 +50,13 @@ def _update_chat_registry(updates: list) -> dict:
 
 
 class TelegramRead(Tool):
-    """Read messages from Telegram chats, list chats, or get chat info."""
+    """Read messages from Telegram chats, list chats, list forum topics, or get chat info."""
 
     async def execute(self, **kwargs) -> Response:
         chat_id = self.args.get("chat_id", "")
         limit = int(self.args.get("limit", "50"))
         action = self.args.get("action", "messages")
+        thread_id = self.args.get("thread_id", "")
 
         config = get_telegram_config(self.agent)
         try:
@@ -127,7 +128,17 @@ class TelegramRead(Tool):
 
                 # Try message store first (populated by bridge)
                 from usr.plugins.telegram.helpers.message_store import get_messages
-                messages = get_messages(str(chat_id), limit=limit)
+                if thread_id:
+                    try:
+                        topic_key = f"{chat_id}:topic:{int(thread_id)}"
+                        messages = get_messages(topic_key, limit=limit)
+                        if not messages:  # fallback: filter from chat messages
+                            messages = [m for m in get_messages(str(chat_id), limit=limit*3)
+                                       if m.get("message_thread_id") == int(thread_id)][-limit:]
+                    except ValueError:
+                        messages = get_messages(str(chat_id), limit=limit)
+                else:
+                    messages = get_messages(str(chat_id), limit=limit)
 
                 # Only fall back to getUpdates if bridge is NOT actively polling.
                 # Concurrent getUpdates calls cause a Conflict error that crashes
@@ -150,6 +161,14 @@ class TelegramRead(Tool):
 
                         messages = messages[-limit:]
 
+                        # Apply thread_id filter if provided
+                        if thread_id and messages:
+                            try:
+                                tid = int(thread_id)
+                                messages = [m for m in messages if m.get("message_thread_id") == tid]
+                            except ValueError:
+                                pass
+
                 await client.close()
 
                 if not messages:
@@ -166,9 +185,32 @@ class TelegramRead(Tool):
                     break_loop=False,
                 )
 
+            elif action == "topics":
+                if not chat_id:
+                    return Response(message="Error: chat_id required for topics.", break_loop=False)
+                # Get topics from local state (populated by FORUM_TOPIC_CREATED events)
+                from usr.plugins.telegram.helpers.telegram_bridge import get_topic_map
+                all_topics = get_topic_map()
+                chat_topics = {k: v for k, v in all_topics.items() if k.startswith(f"{chat_id}:topic:")}
+                await client.close()
+                if not chat_topics:
+                    return Response(
+                        message=f"No topics found for chat {chat_id}. Topics are discovered when the bridge receives FORUM_TOPIC_CREATED events.",
+                        break_loop=False,
+                    )
+                lines = [f"Topics in chat {chat_id} ({len(chat_topics)}):"]
+                for key, info in chat_topics.items():
+                    thread_part = key.split(":topic:")[-1]
+                    name = info.get("name", "Unnamed")
+                    project = info.get("project_id", "")
+                    auto = " [auto-created]" if info.get("auto_created") else ""
+                    proj_str = f", project: {project}" if project else ""
+                    lines.append(f"  - {name} (thread_id: {thread_part}{proj_str}{auto})")
+                return Response(message="\n".join(lines), break_loop=False)
+
             else:
                 return Response(
-                    message=f"Unknown action '{action}'. Use 'messages', 'chats', or 'chat_info'.",
+                    message=f"Unknown action '{action}'. Use 'messages', 'chats', 'chat_info', or 'topics'.",
                     break_loop=False,
                 )
 
@@ -193,4 +235,6 @@ def _format_chat_info(chat: dict) -> str:
         lines.append(f"  Description: {sanitize_chat_title(chat['description'], max_length=200)}")
     if chat.get("invite_link"):
         lines.append(f"  Invite link: {chat['invite_link']}")
+    if chat.get("is_forum"):
+        lines.append(f"  Forum topics: enabled")
     return "\n".join(lines)

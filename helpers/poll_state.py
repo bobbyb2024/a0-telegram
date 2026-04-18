@@ -46,21 +46,24 @@ def get_watch_chats() -> dict:
     return load_state().get("watch_chats", {})
 
 
-def add_watch_chat(chat_id: str, label: str = ""):
-    """Add a chat to the watch list."""
+def add_watch_chat(chat_id: str, label: str = "", thread_id: Optional[int] = None):
+    """Add a chat (or specific topic thread) to the watch list."""
     state = load_state()
-    state.setdefault("watch_chats", {})[chat_id] = {
-        "label": label or chat_id,
+    key = f"{chat_id}:topic:{thread_id}" if thread_id is not None else chat_id
+    state.setdefault("watch_chats", {})[key] = {
+        "label": label or key,
         "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "last_seen_id": 0,
+        "thread_id": thread_id,
     }
     save_state(state)
 
 
-def remove_watch_chat(chat_id: str):
-    """Remove a chat from the watch list."""
+def remove_watch_chat(chat_id: str, thread_id: Optional[int] = None):
+    """Remove a chat or topic thread from the watch list."""
     state = load_state()
-    state.get("watch_chats", {}).pop(chat_id, None)
+    key = f"{chat_id}:topic:{thread_id}" if thread_id is not None else chat_id
+    state.get("watch_chats", {}).pop(key, None)
     save_state(state)
 
 

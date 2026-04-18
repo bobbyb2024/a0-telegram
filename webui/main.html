@@ -4,10 +4,28 @@
         <span data-tgm="status-badge" style="padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600; background: #fce4ec; color: #c62828;">Checking...</span>
     </div>
 
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px;">
+    <!-- Privacy mode advisory (shown when privacy mode is ON) -->
+    <div data-tgm="privacy-advisory" style="display:none; background: #fff3e0; border: 1px solid #ffcc80; border-radius: 6px; padding: 10px; margin-bottom: 14px; font-size: 11px; color: #e65100; line-height: 1.5;">
+        <strong>&#9888; Privacy Mode ON:</strong> <span data-tgm="privacy-advisory-text"></span>
+    </div>
+
+    <!-- Stats row -->
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px; margin-bottom: 16px;">
         <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
             <div style="font-size: 20px; font-weight: 700; color: #0088cc;" data-tgm="chat-count">-</div>
             <div style="font-size: 11px; color: var(--text-secondary, #888);">Bridge Chats</div>
+        </div>
+        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+            <div style="font-size: 20px; font-weight: 700; color: #6a1b9a;" data-tgm="topic-count">-</div>
+            <div style="font-size: 11px; color: var(--text-secondary, #888);">Topics</div>
+        </div>
+        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+            <div style="font-size: 20px; font-weight: 700; color: #2e7d32;" data-tgm="restart-count">-</div>
+            <div style="font-size: 11px; color: var(--text-secondary, #888);">Restarts</div>
+        </div>
+        <div style="text-align: center; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px;">
+            <div style="font-size: 13px; font-weight: 600; color: #37474f;" data-tgm="webhook-mode">-</div>
+            <div style="font-size: 11px; color: var(--text-secondary, #888);">Update mode</div>
         </div>
     </div>
 
@@ -29,6 +47,17 @@
         </div>
         <div data-tgm="bridge-info" style="font-size: 11px; color: var(--text-secondary, #888);"></div>
     </div>
+
+    <!-- Forum Topics Section -->
+    <div style="padding-top: 12px; margin-top: 12px; border-top: 1px solid var(--border-color, #e0e0e0);">
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+            <h4 style="margin: 0; color: #6a1b9a;">Forum Topics</h4>
+            <button onclick="window._tgMain.loadTopics(this)" style="background: var(--bg-secondary, #f0f0f0); color: var(--text-primary, #333); border: none; padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;">Load</button>
+        </div>
+        <div data-tgm="topics-list" style="font-size: 11px; color: var(--text-secondary, #888);">
+            Click Load to show topic mappings.
+        </div>
+    </div>
 </div>
 
 <script>
@@ -42,7 +71,15 @@
     function setBridgeBadge(status) {
         var badge = $('bridge-status');
         var chatCount = $('chat-count');
+        var topicCount = $('topic-count');
+        var restartCount = $('restart-count');
+        var webhookMode = $('webhook-mode');
+
         if (chatCount && status.chat_count !== undefined) chatCount.textContent = status.chat_count;
+        if (topicCount && status.topic_count !== undefined) topicCount.textContent = status.topic_count;
+        if (restartCount && status.restart_count !== undefined) restartCount.textContent = status.restart_count;
+        if (webhookMode) webhookMode.textContent = status.webhook_mode ? 'Webhook' : 'Polling';
+
         if (!badge) return;
         if (status.running && status.status === 'connected') {
             badge.textContent = 'Connected' + (status.user ? ' as ' + status.user : '');
@@ -85,6 +122,8 @@
 
     async function testConnection() {
         var badge = $('status-badge');
+        var advisory = $('privacy-advisory');
+        var advisoryText = $('privacy-advisory-text');
         if (!badge) return;
         badge.textContent = 'Testing...';
         badge.style.background = '#fff3e0'; badge.style.color = '#e65100';
@@ -98,9 +137,18 @@
             if (data.ok) {
                 badge.textContent = 'Connected as ' + data.user;
                 badge.style.background = '#e8f5e9'; badge.style.color = '#2e7d32';
+                if (advisory && advisoryText) {
+                    if (data.privacy_mode && data.privacy_advisory) {
+                        advisoryText.textContent = data.privacy_advisory;
+                        advisory.style.display = '';
+                    } else {
+                        advisory.style.display = 'none';
+                    }
+                }
             } else {
                 badge.textContent = data.error || 'Error';
                 badge.style.background = '#fce4ec'; badge.style.color = '#c62828';
+                if (advisory) advisory.style.display = 'none';
             }
         } catch (e) {
             badge.textContent = 'API unavailable';
@@ -108,7 +156,79 @@
         }
     }
 
-    window._tgMain = { test: testConnection, bridge: bridgeAction };
+    function buildTopicsTable(topics) {
+        var container = $('topics-list');
+        if (!container) return;
+        // Clear existing content using safe DOM operations
+        while (container.firstChild) { container.removeChild(container.firstChild); }
+
+        var table = document.createElement('table');
+        table.style.cssText = 'width:100%;border-collapse:collapse;font-size:11px;';
+
+        // Header
+        var thead = document.createElement('thead');
+        var hrow = document.createElement('tr');
+        ['Topic Key', 'Name', 'Project ID'].forEach(function(label) {
+            var th = document.createElement('th');
+            th.textContent = label;
+            th.style.cssText = 'text-align:left;padding:3px 6px;border-bottom:1px solid var(--border-color,#e0e0e0);color:var(--text-secondary,#888);';
+            hrow.appendChild(th);
+        });
+        thead.appendChild(hrow);
+        table.appendChild(thead);
+
+        // Body rows
+        var tbody = document.createElement('tbody');
+        Object.keys(topics).forEach(function(key) {
+            var info = topics[key];
+            var row = document.createElement('tr');
+
+            var tdKey = document.createElement('td');
+            tdKey.textContent = key;
+            tdKey.style.cssText = 'padding:3px 6px;font-family:monospace;color:#37474f;';
+
+            var tdName = document.createElement('td');
+            tdName.textContent = info.name || '\u2014';
+            tdName.style.cssText = 'padding:3px 6px;';
+
+            var tdProject = document.createElement('td');
+            tdProject.textContent = info.project_id || '\u2014';
+            tdProject.style.cssText = 'padding:3px 6px;color:#6a1b9a;';
+
+            row.appendChild(tdKey);
+            row.appendChild(tdName);
+            row.appendChild(tdProject);
+            tbody.appendChild(row);
+        });
+        table.appendChild(tbody);
+        container.appendChild(table);
+    }
+
+    async function loadTopics(btn) {
+        if (btn) { btn.disabled = true; }
+        var container = $('topics-list');
+        if (!container) { if (btn) btn.disabled = false; return; }
+        try {
+            var resp = await fetchApi(API_BRIDGE, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'list_topics'})
+            });
+            var data = await resp.json();
+            if (!data.ok) {
+                container.textContent = data.error || 'Failed to load topics.';
+            } else if (!data.count) {
+                container.textContent = 'No forum topic mappings configured.';
+            } else {
+                buildTopicsTable(data.topics);
+            }
+        } catch (e) {
+            container.textContent = 'API unavailable.';
+        }
+        if (btn) { btn.disabled = false; }
+    }
+
+    window._tgMain = { test: testConnection, bridge: bridgeAction, loadTopics: loadTopics };
     setTimeout(function() { testConnection(); bridgeAction('status'); }, 50);
 })();
 </script>

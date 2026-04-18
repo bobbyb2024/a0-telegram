@@ -29,6 +29,12 @@ class TelegramBridgeApi(ApiHandler):
                 return await self._stop()
             elif action == "restart":
                 return await self._restart()
+            elif action == "list_topics":
+                return self._list_topics(input)
+            elif action == "map_topic":
+                return self._map_topic(input)
+            elif action == "unmap_topic":
+                return self._unmap_topic(input)
             else:
                 return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
@@ -65,6 +71,49 @@ class TelegramBridgeApi(ApiHandler):
 
         await stop_chat_bridge()
         return {"ok": True, "message": "Bridge stopped", **get_bot_status()}
+
+    def _list_topics(self, input: dict) -> dict:
+        from usr.plugins.telegram.helpers.telegram_bridge import get_topic_map
+        all_topics = get_topic_map()
+        chat_id = str(input.get("chat_id", "")).strip()
+        if chat_id:
+            topics = {k: v for k, v in all_topics.items() if k.startswith(f"{chat_id}:topic:")}
+        else:
+            topics = dict(all_topics)
+        return {"ok": True, "topics": topics, "count": len(topics)}
+
+    def _map_topic(self, input: dict) -> dict:
+        chat_id = str(input.get("chat_id", "")).strip()
+        thread_id = str(input.get("thread_id", "")).strip()
+        project_id = str(input.get("project_id", "")).strip()
+        name = str(input.get("name", "")).strip()
+        if not chat_id or not thread_id:
+            return {"ok": False, "error": "chat_id and thread_id are required"}
+        try:
+            tid = int(thread_id)
+        except ValueError:
+            return {"ok": False, "error": "thread_id must be an integer"}
+        topic_key = f"{chat_id}:topic:{tid}"
+        from usr.plugins.telegram.helpers.telegram_bridge import set_topic_project
+        set_topic_project(topic_key, project_id or topic_key, name or f"Topic {tid}")
+        return {"ok": True, "topic_key": topic_key, "project_id": project_id or topic_key}
+
+    def _unmap_topic(self, input: dict) -> dict:
+        chat_id = str(input.get("chat_id", "")).strip()
+        thread_id = str(input.get("thread_id", "")).strip()
+        if not chat_id or not thread_id:
+            return {"ok": False, "error": "chat_id and thread_id are required"}
+        try:
+            tid = int(thread_id)
+        except ValueError:
+            return {"ok": False, "error": "thread_id must be an integer"}
+        topic_key = f"{chat_id}:topic:{tid}"
+        from usr.plugins.telegram.helpers.telegram_bridge import load_chat_state, save_chat_state
+        state = load_chat_state()
+        removed = state.get("topics", {}).pop(topic_key, None)
+        if removed is not None:
+            save_chat_state(state)
+        return {"ok": True, "removed": removed is not None, "topic_key": topic_key}
 
     async def _restart(self) -> dict:
         from usr.plugins.telegram.helpers.telegram_bridge import get_bot_status, start_chat_bridge, stop_chat_bridge
