@@ -7,6 +7,12 @@
         if (!config.memory) config.memory = {};
         if (!config.polling) config.polling = {};
         if (!config.chat_bridge) config.chat_bridge = {};
+        if (!config.reactions) config.reactions = {};
+        if (!config.streaming) config.streaming = {};
+        if (!config.supergroups) config.supergroups = {};
+        if (!config.approvals) config.approvals = {};
+        if (!config.webhook) config.webhook = {};
+        if (!config.watchdog) config.watchdog = {};
         if (config.allowed_chats === undefined) config.allowed_chats = [];
     ">
         <template x-if="config">
@@ -111,6 +117,30 @@
 
                 <div class="field">
                     <div class="field-label">
+                        <div class="field-title">Max concurrent responses</div>
+                        <div class="field-description">Maximum simultaneous agent responses across all chats. Higher values use more resources.</div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" min="1" max="20" x-model.number="config.chat_bridge.max_concurrent"
+                            x-init="if (!config.chat_bridge.max_concurrent) config.chat_bridge.max_concurrent = 3" />
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Per-user conversation context</div>
+                        <div class="field-description">Each Telegram user gets their own isolated conversation history. When off, all users in a chat share one context.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.chat_bridge.per_user_context" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
                         <div class="field-title">User Allowlist</div>
                         <div class="field-description">Only these Telegram user IDs can interact with the bot. Leave empty to allow all. Get IDs via @userinfobot.</div>
                     </div>
@@ -200,6 +230,286 @@
                         </div>
                     </div>
                 </template>
+
+                <!-- Emoji Reactions -->
+                <div class="section-title">Emoji Reactions</div>
+                <div class="section-description">
+                    The bot reacts to incoming messages to signal its processing state. Requires the bot to have
+                    reaction permissions. Silently ignored if reactions are disabled in the chat.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable reactions</div>
+                        <div class="field-description">React with emojis to show message processing status.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.reactions.enabled"
+                                x-init="if (config.reactions.enabled === undefined) config.reactions.enabled = true" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <template x-if="config.reactions.enabled">
+                    <div>
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Received (👍)</div>
+                                <div class="field-description">Sent immediately when a message arrives.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="text" x-model="config.reactions.pre_react"
+                                    x-init="if (!config.reactions.pre_react) config.reactions.pre_react = '👍'"
+                                    style="width: 60px; text-align: center;" maxlength="8" />
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Processing (🤔)</div>
+                                <div class="field-description">Shown while the agent is thinking.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="text" x-model="config.reactions.processing_react"
+                                    x-init="if (!config.reactions.processing_react) config.reactions.processing_react = '🤔'"
+                                    style="width: 60px; text-align: center;" maxlength="8" />
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Success (✅)</div>
+                                <div class="field-description">Shown after a successful response.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="text" x-model="config.reactions.success_react"
+                                    x-init="if (!config.reactions.success_react) config.reactions.success_react = '✅'"
+                                    style="width: 60px; text-align: center;" maxlength="8" />
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Error (❌)</div>
+                                <div class="field-description">Shown when the agent encounters an error.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="text" x-model="config.reactions.failure_react"
+                                    x-init="if (!config.reactions.failure_react) config.reactions.failure_react = '❌'"
+                                    style="width: 60px; text-align: center;" maxlength="8" />
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Streaming -->
+                <div class="section-title">Streaming Responses</div>
+                <div class="section-description">
+                    Progressively edit the bot's reply as text is generated, so users see output in real time
+                    instead of waiting for a complete response.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable streaming</div>
+                        <div class="field-description">Stream partial responses via progressive message edits.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.streaming.enabled"
+                                x-init="if (config.streaming.enabled === undefined) config.streaming.enabled = true" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <template x-if="config.streaming.enabled">
+                    <div>
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Streaming granularity</div>
+                                <div class="field-description">How much text to accumulate before each edit. <strong>Sentence</strong> balances smoothness and API usage.</div>
+                            </div>
+                            <div class="field-control">
+                                <select x-model="config.streaming.mode"
+                                    x-init="if (!config.streaming.mode) config.streaming.mode = 'sentence'">
+                                    <option value="word">Word — most granular, highest API usage</option>
+                                    <option value="sentence">Sentence — balanced (recommended)</option>
+                                    <option value="paragraph">Paragraph — least granular, lowest API usage</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Edit interval (ms)</div>
+                                <div class="field-description">Minimum milliseconds between edits. Lower = smoother but more API calls. Telegram allows ~20 edits/min per message.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="number" min="500" max="10000" step="100"
+                                    x-model.number="config.streaming.edit_interval_ms"
+                                    x-init="if (!config.streaming.edit_interval_ms) config.streaming.edit_interval_ms = 1500" />
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Supergroups & Forum Topics -->
+                <div class="section-title">Supergroups &amp; Forum Topics</div>
+                <div class="section-description">
+                    Route forum topic threads to separate Agent Zero project contexts. Each topic gets its own
+                    isolated conversation history. Topics are mapped via the <code>telegram_manage</code> tool.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Auto-context on new topic</div>
+                        <div class="field-description">Automatically create an Agent Zero context when a new forum topic is created in a watched supergroup.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.supergroups.auto_context_on_new_topic"
+                                x-init="if (config.supergroups.auto_context_on_new_topic === undefined) config.supergroups.auto_context_on_new_topic = true" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Topic project prefix</div>
+                        <div class="field-description">Prefix for auto-generated project IDs. Final ID: <code>{prefix}{chat_id}:topic:{thread_id}</code></div>
+                    </div>
+                    <div class="field-control">
+                        <input type="text" x-model="config.supergroups.topic_project_prefix"
+                            x-init="if (config.supergroups.topic_project_prefix === undefined) config.supergroups.topic_project_prefix = 'tg-'"
+                            placeholder="tg-" style="width: 120px;" />
+                    </div>
+                </div>
+
+                <!-- Approval Workflow -->
+                <div class="section-title">Approval Workflow</div>
+                <div class="section-description">
+                    Inline button confirmations for sensitive agent actions. The agent presents Yes/No buttons;
+                    the user's click resolves the pending approval.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Approval timeout (seconds)</div>
+                        <div class="field-description">How long to wait for a button click before timing out.</div>
+                    </div>
+                    <div class="field-control">
+                        <input type="number" min="10" max="600"
+                            x-model.number="config.approvals.timeout_seconds"
+                            x-init="if (!config.approvals.timeout_seconds) config.approvals.timeout_seconds = 60" />
+                    </div>
+                </div>
+
+                <!-- Webhook Mode -->
+                <div class="section-title">Webhook Mode</div>
+                <div class="section-description">
+                    Alternative to long-polling. Telegram POSTs updates directly to your public HTTPS URL.
+                    Requires a reverse proxy (nginx/traefik) and a valid TLS certificate.
+                    Register with <code>/setWebhook</code> via @BotFather or the <code>telegram_manage</code> tool.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable webhook mode</div>
+                        <div class="field-description">Use webhook instead of getUpdates long-polling. The bridge must be restarted after changing this setting.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.webhook.enabled" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <template x-if="config.webhook.enabled">
+                    <div>
+                        <div style="background: var(--bg-info, #e3f2fd); border: 1px solid var(--border-info, #90caf9); border-radius: 6px; padding: 10px; margin-bottom: 12px;">
+                            <div style="font-size: 11px; color: var(--text-info, #1565c0); line-height: 1.5;">
+                                Webhook endpoint: <code>/api/plugins/telegram/webhook</code><br>
+                                Must be reachable from Telegram servers (reverse-proxied HTTPS).
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Webhook URL</div>
+                                <div class="field-description">Public HTTPS URL Telegram will POST updates to (e.g. https://yourdomain.com/api/plugins/telegram/webhook).</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="url" x-model="config.webhook.url"
+                                    placeholder="https://yourdomain.com/api/plugins/telegram/webhook" />
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Secret Token</div>
+                                <div class="field-description">Optional. Sent in X-Telegram-Bot-Api-Secret-Token header to verify requests are from Telegram.</div>
+                            </div>
+                            <div class="field-control" style="display: flex; gap: 6px; align-items: center;">
+                                <input type="password" x-model="config.webhook.secret_token"
+                                    placeholder="Optional secret token" style="flex: 1;" />
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Watchdog -->
+                <div class="section-title">Bridge Watchdog</div>
+                <div class="section-description">
+                    Automatically restarts the chat bridge if it crashes or stops receiving messages.
+                </div>
+
+                <div class="field">
+                    <div class="field-label">
+                        <div class="field-title">Enable watchdog</div>
+                        <div class="field-description">Monitor the bridge and restart it automatically on failure.</div>
+                    </div>
+                    <div class="field-control">
+                        <label class="toggle">
+                            <input type="checkbox" x-model="config.watchdog.enabled"
+                                x-init="if (config.watchdog.enabled === undefined) config.watchdog.enabled = true" />
+                            <span class="toggler"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <template x-if="config.watchdog.enabled">
+                    <div>
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Stale timeout (seconds)</div>
+                                <div class="field-description">Seconds of inactivity before the bridge is considered stale and restarted.</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="number" min="60" max="3600"
+                                    x-model.number="config.watchdog.stale_seconds"
+                                    x-init="if (!config.watchdog.stale_seconds) config.watchdog.stale_seconds = 300" />
+                            </div>
+                        </div>
+
+                        <div class="field">
+                            <div class="field-label">
+                                <div class="field-title">Max auto-restarts</div>
+                                <div class="field-description">How many times to automatically restart before giving up (resets after 1 hour clean run).</div>
+                            </div>
+                            <div class="field-control">
+                                <input type="number" min="1" max="20"
+                                    x-model.number="config.watchdog.max_restarts"
+                                    x-init="if (!config.watchdog.max_restarts) config.watchdog.max_restarts = 5" />
+                            </div>
+                        </div>
+                    </div>
+                </template>
+
             </div>
         </template>
     </div>

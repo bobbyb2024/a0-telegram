@@ -84,7 +84,6 @@ _INJECTION_PHRASES = [
     r"new instructions:",
     r"override:",
     r"system:",
-    r"SYSTEM:",
     r"reminder:",
     r"important:",
     r"attention:",
@@ -212,12 +211,14 @@ def sanitize_filename(name: str, max_length: int = MAX_FILENAME) -> str:
     """Sanitize an attachment filename."""
     if not name:
         return "file"
+    # Strip null bytes first (path-traversal via embedded \x00)
+    name = name.replace("\x00", "")
     name = name[:max_length]
     # Strip path traversal
     name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
     # Remove newlines
     name = name.replace("\n", "").replace("\r", "")
-    return name
+    return name or "file"
 
 
 def sanitize_chat_title(name: str, max_length: int = MAX_USERNAME) -> str:
@@ -264,14 +265,40 @@ def validate_chat_id(value: str, name: str = "chat_id") -> str:
     return value
 
 
+def validate_topic_key(value: str, name: str = "topic_key") -> str:
+    """Validate a plain chat_id OR a '{chat_id}:topic:{thread_id}' composite key.
+
+    Returns the validated string or raises ValueError.
+    """
+    if not value:
+        raise ValueError(f"{name} is required.")
+    value = value.strip()
+
+    if ":topic:" in value:
+        parts = value.split(":topic:", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid {name}: malformed topic key.")
+        chat_part = validate_chat_id(parts[0], f"{name} (chat_id part)")
+        thread_part = parts[1].strip()
+        if not re.match(r'^\d+$', thread_part):
+            raise ValueError(f"Invalid {name}: thread_id must be a positive integer.")
+        return f"{chat_part}:topic:{thread_part}"
+
+    return validate_chat_id(value, name)
+
+
 def validate_image_url(url: str) -> bool:
-    """Check that a URL is from an allowed Telegram CDN host (SSRF defense)."""
+    """Check that a URL is from an allowed Telegram CDN host (SSRF defense).
+
+    Only HTTPS is accepted — HTTP is intentionally excluded to prevent
+    MITM/redirect-based SSRF attacks.
+    """
     if not url:
         return False
     try:
         from urllib.parse import urlparse
         parsed = urlparse(url)
-        if parsed.scheme not in ("https", "http"):
+        if parsed.scheme != "https":
             return False
         if parsed.hostname not in _ALLOWED_IMAGE_HOSTS:
             return False
@@ -310,28 +337,48 @@ def require_auth(config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def secure_write_json(path, data, indent: int = 2):
-    """Write JSON to a file with restrictive permissions (0o600) and atomic rename."""
+    """Write JSON to a file with restrictive permissions (0o600) and atomic rename.
+
+    Uses a process-unique temp filename to avoid collisions when called
+    concurrently for the same destination path.  The rename is atomic on
+    POSIX (same filesystem), so readers never see a partial file.
+    """
     import json
+    import logging as _logging
     from pathlib import Path
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
+    # Unique name prevents concurrent writers from truncating each other's work
+    tmp_path = path.with_name(f"{path.stem}.{os.getpid()}.{id(data)}.tmp")
     try:
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent)
         os.replace(str(tmp_path), str(path))
-    except Exception:
+    except Exception as primary_err:
+        # Cleanup partial tmp file
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
-        with open(path, "w") as f:
-            json.dump(data, f, indent=indent)
+        # Degraded fallback: still write securely (no guarantee of atomicity)
+        _logging.getLogger("sanitize").warning(
+            "secure_write_json: atomic write failed (%s), "
+            "falling back to non-atomic write for %s",
+            type(primary_err).__name__, path,
+        )
         try:
-            os.chmod(str(path), 0o600)
-        except OSError:
-            pass
+            fd2 = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd2, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=indent)
+        except Exception:
+            # Last-resort plain write; at least try to chmod afterwards
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=indent)
+            try:
+                os.chmod(str(path), 0o600)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ Summarize a Telegram chat conversation using LLM. Produces structured summary wi
 - **limit** (number): Messages to analyze (default: 100)
 - **focus** (string): Optional topic to focus on
 - **save_to_memory** (string): "true" or "false" (default: "true")
+- **thread_id** (string): Forum topic thread ID to summarize only that topic's messages (optional)
 
 ~~~json
 {"chat_id": "-1001234567890"}
@@ -17,4 +18,7 @@ Summarize a Telegram chat conversation using LLM. Produces structured summary wi
 ~~~
 ~~~json
 {"chat_id": "-1001234567890", "save_to_memory": "false"}
+~~~
+~~~json
+{"action": "summarize", "chat_id": "-1001234567890", "thread_id": "42", "limit": "100"}
 ~~~

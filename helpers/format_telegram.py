@@ -231,3 +231,24 @@ def _unclosed_tags(html: str) -> list[tuple[str, str]]:
         else:
             stack.append((name, m.group(0)))
     return stack
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+def format_streaming_chunk(text: str) -> str:
+    """Escape text for a streaming-in-progress edit.
+
+    Uses plain HTML-escaped text (no markdown conversion) with a cursor
+    appended. Safe for partial/incomplete text that may have unclosed markdown.
+    """
+    return _escape_html(text) + " ▌"
+
+
+def format_streaming_final(text: str) -> str:
+    """Full markdown->HTML conversion for the final streaming edit.
+
+    Called once when the complete response is ready.
+    """
+    return markdown_to_telegram_html(text)

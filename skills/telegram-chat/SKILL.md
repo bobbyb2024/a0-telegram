@@ -10,6 +10,9 @@ triggers:
   - "chat through telegram"
   - "telegram llm chat"
   - "talk to agent on telegram"
+  - "bridge a supergroup topic"
+  - "map topic to project"
+  - "add a topic to the bridge"
 allowed_tools:
   - telegram_chat
   - telegram_read
@@ -48,6 +51,18 @@ Check that the bot is connected:
 {"tool": "telegram_chat", "args": {"action": "status"}}
 ```
 
+### Optional: Bridge a Supergroup Topic
+To route only a specific forum topic thread to Agent Zero:
+```json
+{"tool": "telegram_chat", "args": {"action": "add_chat", "chat_id": "-1001234567890", "thread_id": "42", "label": "Sprint Planning"}}
+```
+
+### Optional: Map Topic to Project
+To associate a forum topic with a project identifier:
+```json
+{"tool": "telegram_manage", "args": {"action": "map_topic", "chat_id": "-1001234567890", "thread_id": "42", "project_id": "proj_sprint42", "name": "Sprint 42"}}
+```
+
 ## How It Works
 - The bot uses long polling for real-time message delivery (no public URL needed)
 - Each designated chat gets its own conversation context
@@ -67,3 +82,6 @@ Check that the bot is connected:
 - The bot only responds in chats you explicitly add
 - Use `stop` and `start` to restart the bot if issues arise
 - Enable `auto_start` in config to launch the bot automatically on agent startup
+- For supergroups with forum topics, use `thread_id` to bridge individual topics rather than the whole group
+- Topic keys are stored as `{chat_id}:topic:{thread_id}` — visible in the `list` output
+- Use `telegram_manage` with `list_topics` to see all topic-to-project mappings

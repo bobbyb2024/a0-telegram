@@ -10,6 +10,9 @@ triggers:
   - "summarize telegram"
   - "analyze telegram"
   - "telegram chat summary"
+  - "read messages from a supergroup topic"
+  - "list forum topics"
+  - "summarize a topic thread"
 allowed_tools:
   - telegram_read
   - telegram_summarize
@@ -34,10 +37,19 @@ Use Telegram tools to gather knowledge from Telegram chats.
 3. **Read messages** from a chat:
    `telegram_read` with `action: messages`, `chat_id: CHAT_ID`, `limit: 50`
 
-4. **Summarize** for a structured overview:
+4. **Read messages from a forum topic**:
+   `telegram_read` with `action: messages`, `chat_id: CHAT_ID`, `thread_id: THREAD_ID`, `limit: 50`
+
+5. **List forum topics** in a supergroup:
+   `telegram_read` with `action: topics`, `chat_id: CHAT_ID`
+
+6. **Summarize** for a structured overview:
    `telegram_summarize` with `chat_id: CHAT_ID`
 
-5. **Check members** — list administrators:
+7. **Summarize a topic thread**:
+   `telegram_summarize` with `chat_id: CHAT_ID`, `thread_id: THREAD_ID`
+
+8. **Check members** — list administrators:
    `telegram_members` with `chat_id: CHAT_ID`
 
 ## Tips
@@ -45,3 +57,4 @@ Use Telegram tools to gather knowledge from Telegram chats.
 - Chat IDs for groups are negative numbers
 - Use `telegram_summarize` with `focus` to narrow analysis
 - Summaries auto-save to memory by default
+- Use `topics` action to discover forum topic thread IDs before reading topic-specific messages

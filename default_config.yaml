@@ -43,6 +43,70 @@ chat_bridge:
   # after this duration and must be re-authenticated.
   session_timeout: 300
 
+  # Maximum concurrent agent responses across all chats (prevents overload).
+  max_concurrent: 3
+
+  # Per-user context isolation: each Telegram user gets their own conversation
+  # history even within the same chat. When false, all users share one context.
+  per_user_context: false
+
+# Emoji reactions — sent on incoming messages to signal processing state.
+# Requires the bot to have the "can_post_messages" right in the chat.
+# setMessageReaction silently fails if reactions are disabled in the chat.
+reactions:
+  enabled: true
+  # Sent immediately when a message arrives (pre-processing acknowledgement).
+  pre_react: "👍"
+  # Sent while the agent is thinking (replaces pre_react).
+  processing_react: "🤔"
+  # Sent on successful response (replaces processing_react).
+  success_react: "✅"
+  # Sent when the agent encounters an error.
+  failure_react: "❌"
+
+# Streaming — progressively edit the bot's reply as text is generated.
+streaming:
+  enabled: true
+  # Granularity of streamed updates: "word", "sentence", or "paragraph".
+  mode: "sentence"
+  # Minimum milliseconds between Telegram edit calls (Telegram limit: ~20/min per message).
+  edit_interval_ms: 1500
+
+# Supergroup / Forum topic integration.
+supergroups:
+  # Automatically create an Agent Zero context when a new forum topic is created.
+  auto_context_on_new_topic: true
+  # Prefix applied to auto-created project IDs for new topics.
+  # Final ID: "{prefix}{chat_id}:topic:{thread_id}"
+  topic_project_prefix: "tg-"
+
+# Approval workflow — inline button confirmations for sensitive actions.
+approvals:
+  # Seconds to wait for a button press before timing out.
+  timeout_seconds: 60
+
+# Webhook mode (alternative to getUpdates long-polling).
+# When enabled the bridge expects Telegram to POST updates to webhook_url.
+# You must run set_webhook via @BotFather or telegram_manage to register it.
+webhook:
+  enabled: false
+  # Public HTTPS URL Telegram will POST to. Must be reachable by Telegram servers.
+  url: ""
+  # Optional secret token (set in setWebhook, verified in X-Telegram-Bot-Api-Secret-Token header).
+  secret_token: ""
+  # Local port the webhook listener binds to (reverse-proxied by nginx/traefik in prod).
+  port: 8443
+  # Path suffix for the webhook endpoint (appended to webhook url).
+  path: "/api/plugins/telegram/webhook"
+
+# Bridge watchdog — auto-restarts the bridge if it crashes or goes silent.
+watchdog:
+  enabled: true
+  # Seconds of silence (no processed messages) before declaring the bridge stale.
+  stale_seconds: 300
+  # Maximum automatic restarts before giving up (resets after 1 hour clean run).
+  max_restarts: 5
+
 # Security — prompt injection defense
 security:
   max_message_length: 4096

@@ -4,7 +4,7 @@ from helpers.tool import Tool, Response
 from usr.plugins.telegram.helpers.telegram_client import (
     TelegramClient, TelegramAPIError, format_messages, get_telegram_config,
 )
-from usr.plugins.telegram.helpers.sanitize import require_auth, truncate_bulk, clamp_limit
+from usr.plugins.telegram.helpers.sanitize import require_auth, truncate_bulk, clamp_limit, sanitize_content
 
 SUMMARIZE_PROMPT = """You are summarizing a Telegram conversation. Analyze the following messages and produce a structured summary.
 
@@ -55,6 +55,7 @@ class TelegramSummarize(Tool):
         limit = clamp_limit(int(self.args.get("limit", "100")), default=100)
         focus = self.args.get("focus", "")
         save_to_memory = self.args.get("save_to_memory", "true").lower() == "true"
+        thread_id = self.args.get("thread_id", "")
 
         if not chat_id:
             return Response(message="Error: chat_id is required.", break_loop=False)
@@ -98,6 +99,20 @@ class TelegramSummarize(Tool):
 
             await client.close()
 
+            # Filter by thread_id if provided (topic-specific summary)
+            if thread_id and messages:
+                try:
+                    tid = int(thread_id)
+                    # Try topic-key store first
+                    from usr.plugins.telegram.helpers.message_store import get_messages as get_msgs
+                    topic_msgs = get_msgs(f"{chat_id}:topic:{tid}", limit=limit)
+                    if topic_msgs:
+                        messages = topic_msgs
+                    else:
+                        messages = [m for m in messages if m.get("message_thread_id") == tid]
+                except (ValueError, Exception):
+                    pass
+
             if not messages:
                 return Response(message=f"No messages found in {chat_name}.", break_loop=False)
 
@@ -106,7 +121,8 @@ class TelegramSummarize(Tool):
 
             prompt = SUMMARIZE_PROMPT.format(messages=formatted)
             if focus:
-                prompt += f"\n\nFocus especially on: {focus}"
+                safe_focus = sanitize_content(focus, max_length=500)
+                prompt += f"\n\nFocus especially on: {safe_focus}"
 
             summary = await self.agent.call_utility_model(
                 system=(
@@ -122,8 +138,9 @@ class TelegramSummarize(Tool):
                 self.set_progress("Saving to memory...")
                 timestamp = time.strftime("%Y-%m-%d %H:%M", time.gmtime())
                 memory_text = (
-                    f"Telegram Summary - {chat_name} (chat: {chat_id}) "
-                    f"[{timestamp}, {len(messages)} messages]\n\n{summary}"
+                    f"Telegram Summary - {chat_name} (chat: {chat_id}"
+                    + (f", thread: {thread_id}" if thread_id else "")
+                    + f") [{timestamp}, {len(messages)} messages]\n\n{summary}"
                 )
                 await _save_to_memory(self.agent, memory_text)
 
