@@ -1373,10 +1373,16 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             bot._bot_user = me
             logger.info(f"Chat bridge connected as @{me.username} (ID: {me.id})")
 
-            # Register bot commands with Telegram
+            # Register bot commands with Telegram.
+            # PTB v21 requires BotCommand objects, not plain dicts.
             try:
-                await app.bot.set_my_commands(BRIDGE_COMMANDS)
-                logger.info("Registered bot commands")
+                from telegram import BotCommand as _BotCommand
+                ptb_commands = [
+                    _BotCommand(command=c["command"], description=c["description"])
+                    for c in BRIDGE_COMMANDS
+                ]
+                await app.bot.set_my_commands(ptb_commands)
+                logger.info("Registered %d bot commands", len(ptb_commands))
             except Exception as e:
                 logger.warning(f"Could not register bot commands: {e}")
 
