@@ -37,6 +37,16 @@ class TelegramBridgeApi(ApiHandler):
                 return self._unmap_topic(input)
             elif action == "diagnose":
                 return self._diagnose()
+            elif action == "set_debug":
+                return self._set_debug(input)
+            elif action == "get_debug":
+                return self._get_debug()
+            elif action == "project_sync_status":
+                return self._project_sync_status()
+            elif action == "project_sync_trigger":
+                return self._project_sync_trigger()
+            elif action == "project_sync_reset_baseline":
+                return self._project_sync_reset_baseline()
             else:
                 return {"ok": False, "error": f"Unknown action: {action}"}
         except Exception as e:
@@ -47,9 +57,12 @@ class TelegramBridgeApi(ApiHandler):
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     def _status(self) -> dict:
-        from usr.plugins.telegram.helpers.telegram_bridge import get_bot_status, get_chat_list
+        from usr.plugins.telegram.helpers.telegram_bridge import (
+            get_bot_status, get_chat_list, get_debug_mode,
+        )
         status = get_bot_status()
         status["chat_count"] = len(get_chat_list())
+        status["debug_mode"] = bool(get_debug_mode())
         return {"ok": True, **status}
 
     async def _start(self) -> dict:
@@ -136,6 +149,7 @@ class TelegramBridgeApi(ApiHandler):
         try:
             from usr.plugins.telegram.helpers.telegram_bridge import (
                 BRIDGE_CODE_VERSION, get_bot_status, get_chat_list, get_topic_map,
+                get_debug_mode,
             )
             from usr.plugins.telegram.helpers.telegram_client import get_telegram_config
 
@@ -156,6 +170,7 @@ class TelegramBridgeApi(ApiHandler):
                 "token_masked": token_masked,
                 "full_agent_mode": bridge_cfg.get("full_agent_mode", True),
                 "allow_elevated": bridge_cfg.get("allow_elevated", False),
+                "debug_mode": bool(get_debug_mode()),
                 "chat_list": {
                     "size": len(chat_list),
                     "keys": list(chat_list.keys()),
@@ -176,6 +191,88 @@ class TelegramBridgeApi(ApiHandler):
         except Exception as e:
             logger.error("diagnose error: %s: %s", type(e).__name__, e, exc_info=True)
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    def _set_debug(self, input: dict) -> dict:
+        """Flip the runtime debug-trace flag on the live bridge.
+
+        Accepts ``{"enabled": true|false}``. Changes apply immediately — no
+        restart needed. The flag is also seeded from chat_bridge.debug_mode
+        in config at bridge startup, so setting it here is in-memory only
+        (survives until bridge restart). To make it persistent, update the
+        config file as well.
+        """
+        from usr.plugins.telegram.helpers.telegram_bridge import (
+            set_debug_mode, get_debug_mode,
+        )
+        enabled = bool(input.get("enabled", False))
+        new_val = set_debug_mode(enabled)
+        logger.info("Debug-trace flag %s via API", "ENABLED" if new_val else "DISABLED")
+        return {
+            "ok": True,
+            "enabled": new_val,
+            "message": (
+                f"Debug trace {'enabled — every message step will emit a [DBG] log line.' if new_val else 'disabled — silent operation resumed.'}"
+            ),
+        }
+
+    def _get_debug(self) -> dict:
+        """Return the current state of the runtime debug-trace flag."""
+        from usr.plugins.telegram.helpers.telegram_bridge import get_debug_mode
+        return {"ok": True, "enabled": bool(get_debug_mode())}
+
+    def _project_sync_status(self) -> dict:
+        """Return a snapshot of the A0 ↔ Telegram project-sync watcher state.
+
+        Shows whether the loop is running, the last successful tick, the
+        last error (if any), and the resolved config (enabled, supergroup,
+        archive_action, poll interval, baseline size). The WebUI polls this
+        to render the sync panel.
+        """
+        from usr.plugins.telegram.helpers.telegram_bridge import get_project_sync_status
+        return {"ok": True, **get_project_sync_status()}
+
+    def _project_sync_trigger(self) -> dict:
+        """Run one project-sync pass on demand and return its summary.
+
+        Useful for "I just created a context in A0, mirror it NOW" without
+        waiting for the poll interval. Blocks up to 30 s while the bridge
+        thread executes the tick. Returns the same dict shape the
+        background loop logs internally (``created_topics``,
+        ``closed_topics``, ``deleted_topics``, ``error``).
+        """
+        from usr.plugins.telegram.helpers.telegram_bridge import trigger_project_sync_tick
+        summary = trigger_project_sync_tick()
+        # trigger_project_sync_tick already returns {"ok": bool, ...}
+        if isinstance(summary, dict) and "ok" in summary:
+            return summary
+        return {"ok": True, "summary": summary}
+
+    def _project_sync_reset_baseline(self) -> dict:
+        """Forget the baseline snapshot so the next tick re-initialises it.
+
+        Handy after an operator imports contexts in bulk and wants the
+        mirror to start fresh from "now". The default behaviour will
+        record all currently-existing contexts as baseline (so none get
+        topics created). If the config has ``sync_existing: true`` this
+        instead triggers a one-shot back-fill.
+        """
+        from usr.plugins.telegram.helpers.telegram_bridge import (
+            set_project_baseline, load_chat_state, save_chat_state,
+        )
+        # Remove the baseline key entirely so is_project_baseline_initialized()
+        # reads False and the next tick runs Phase 0 bootstrap.
+        state = load_chat_state()
+        had_baseline = "project_baseline" in state
+        state.pop("project_baseline", None)
+        save_chat_state(state)
+        return {
+            "ok": True,
+            "previous_baseline_existed": had_baseline,
+            "message": (
+                "Baseline cleared. The next project-sync tick will "
+                "re-initialise it from the current set of A0 contexts."
+            ),
+        }
 
     async def _restart(self) -> dict:
         from usr.plugins.telegram.helpers.telegram_bridge import get_bot_status, start_chat_bridge, stop_chat_bridge

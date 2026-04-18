@@ -61,6 +61,15 @@ chat_bridge:
   # history even within the same chat. When false, all users share one context.
   per_user_context: false
 
+  # Debug trace: when true, every step of the message-processing pipeline
+  # emits a `[DBG]` log line (receive → chat filter → user filter → rate
+  # limit → agent call → send → success reaction). Use when diagnosing
+  # "my messages don't get processed" issues. This value seeds the runtime
+  # flag at bridge startup; it can also be toggled live from the bridge
+  # dashboard without touching config. Leave false in production — every
+  # message produces ~20 extra log lines.
+  debug_mode: false
+
 # Emoji reactions — sent on incoming messages to signal processing state.
 # Requires the bot to have the "can_post_messages" right in the chat.
 # setMessageReaction silently fails if reactions are disabled in the chat.
@@ -90,6 +99,46 @@ supergroups:
   # Prefix applied to auto-created project IDs for new topics.
   # Final ID: "{prefix}{chat_id}:topic:{thread_id}"
   topic_project_prefix: "tg-"
+
+# Bi-directional sync: Agent Zero project ↔ Telegram topic.
+#
+# When enabled, the bridge watches Agent Zero's context list and mirrors
+# changes into a designated forum-enabled supergroup on Telegram:
+#
+#   * New A0 context (created in the web UI)  → new forum topic in TG
+#   * A0 context archived / removed           → topic is closed or deleted in TG
+#
+# Pair with supergroups.auto_context_on_new_topic (already true) so the
+# reverse direction also works — creating a topic from Telegram makes a
+# matching A0 project.
+#
+# Setup requirements:
+#   1. Create (or pick) a supergroup on Telegram and enable "Topics".
+#   2. Make the bot an admin with "Manage Topics" permission.
+#   3. Set supergroup_id below to the chat ID (looks like "-1001234567890").
+#
+# Defaults to OFF because enabling it can auto-create many topics the
+# first time it runs. Opt in after the supergroup is prepared.
+project_sync:
+  enabled: false
+  # Chat ID of the forum-enabled supergroup where A0 projects become topics.
+  # Must be numeric (e.g. "-1001234567890"). Get it by forwarding a message
+  # from the group to @userinfobot.
+  supergroup_id: ""
+  # What to do when an A0 context disappears: "close" (soft — history kept,
+  # topic is locked; user can reopen) or "delete" (destructive — topic and
+  # its messages are removed permanently).
+  archive_action: "close"
+  # Seconds between sync passes. Shorter = faster mirroring, more API calls.
+  poll_interval: 15
+  # On first run, sync existing A0 contexts (create topics for each). If
+  # false (default), pre-existing contexts are added to a "baseline" list
+  # and ignored — only contexts created AFTER sync is first enabled will
+  # get topics. Flip to true only if you deliberately want to back-fill.
+  sync_existing: false
+  # Optional: ignore contexts whose name starts with any of these prefixes
+  # (lets you keep certain A0 chats local without them appearing in TG).
+  name_ignore_prefixes: ["_", "tmp-", "scratch"]
 
 # Approval workflow — inline button confirmations for sensitive actions.
 approvals:

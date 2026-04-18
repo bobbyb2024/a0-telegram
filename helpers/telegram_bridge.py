@@ -26,7 +26,7 @@ logger = logging.getLogger("telegram_chat_bridge")
 # Bumped on every behaviour change so startup logs clearly show which code is
 # running.  If you see an old BRIDGE_CODE_VERSION in the logs after deploying,
 # the container's __pycache__ is stale — delete *.pyc and restart the bridge.
-BRIDGE_CODE_VERSION = "2026-04-18-diag-2"
+BRIDGE_CODE_VERSION = "2026-04-18-project-sync-1"
 
 # Protects all load-mutate-save cycles on the chat state file so concurrent
 # tool calls (running on the bridge thread or a separate thread) cannot
@@ -90,6 +90,26 @@ _start_lock = threading.Lock()
 # user can recover by updating their token and clicking "Start Bridge".
 _fatal_error: Optional[str] = None       # human-readable reason
 _fatal_error_type: Optional[str] = None  # "token" | "config" | "unknown"
+
+# Runtime debug-trace flag.  When true, every step of the message-processing
+# pipeline emits a `[DBG]` log line so operators can watch a message flow
+# through receive → filter → agent → response in real time.
+# Flipped via POST /api/plugins/telegram/telegram_bridge_api {"action":"set_debug","enabled":true/false}
+# Seeded from chat_bridge.debug_mode in config at bridge startup; changes
+# made via the API are in-memory and apply to the live bridge immediately.
+_debug_mode: bool = False
+
+
+def set_debug_mode(enabled: bool) -> bool:
+    """Flip the runtime debug-trace flag; returns the new value."""
+    global _debug_mode
+    _debug_mode = bool(enabled)
+    return _debug_mode
+
+
+def get_debug_mode() -> bool:
+    """Return the current runtime debug-trace flag."""
+    return _debug_mode
 
 CHAT_STATE_FILE = "chat_bridge_state.json"
 
@@ -196,6 +216,113 @@ def touch_topic(topic_key: str):
             save_chat_state(state)
 
 
+def detach_conversation(conv_key: str) -> dict:
+    """Break the link between a Telegram conversation and its A0 project.
+
+    Removes the conversation's context_id and topic_project entries from
+    persistent state. The underlying Agent Zero context is NOT deleted —
+    the user can still find it in the A0 web UI if they want to keep the
+    conversation history. The next message in the same conv_key (if any
+    ever arrives) will create a fresh A0 project.
+
+    Called when:
+      - the bot is removed/kicked from a Telegram chat (my_chat_member
+        status → left/kicked)
+      - the chat is explicitly removed via the telegram_chat tool
+      - an admin manually detaches via the API
+
+    Returns a small dict describing what was removed, for logging.
+    """
+    with _state_lock:
+        state = load_chat_state()
+        removed_context = state.get("contexts", {}).pop(conv_key, None)
+        removed_topic = state.get("topics", {}).pop(conv_key, None)
+        if removed_context is not None or removed_topic is not None:
+            save_chat_state(state)
+    return {
+        "conv_key": conv_key,
+        "removed_context_id": removed_context,
+        "removed_topic_mapping": removed_topic is not None,
+    }
+
+
+def get_conv_key_for_context(context_id: str) -> Optional[str]:
+    """Inverse lookup: find the Telegram conv_key bound to an A0 context id.
+
+    Scans ``state.contexts`` (which maps conv_key → context_id) and returns
+    the first conv_key whose value matches. Returns None if the context
+    isn't bound to any Telegram conversation.
+    """
+    if not context_id:
+        return None
+    contexts = load_chat_state().get("contexts", {})
+    for conv_key, ctx_id in contexts.items():
+        if ctx_id == context_id:
+            return conv_key
+    return None
+
+
+def get_project_baseline() -> set[str]:
+    """Return the set of A0 context IDs the sync watcher should ignore.
+
+    The baseline is the snapshot of contexts that existed on the first
+    sync run — we don't want to retroactively create topics for contexts
+    the user already had when they enabled project sync. New contexts
+    created AFTER the baseline was captured get topics; baseline
+    contexts are left alone.
+    """
+    return set(load_chat_state().get("project_baseline", []))
+
+
+def set_project_baseline(ids) -> None:
+    """Persist the baseline set of context IDs to skip."""
+    with _state_lock:
+        state = load_chat_state()
+        state["project_baseline"] = sorted(set(ids))
+        save_chat_state(state)
+
+
+def add_to_project_baseline(context_id: str) -> None:
+    """Add a single context id to the baseline (idempotent)."""
+    if not context_id:
+        return
+    with _state_lock:
+        state = load_chat_state()
+        baseline = set(state.get("project_baseline", []))
+        if context_id not in baseline:
+            baseline.add(context_id)
+            state["project_baseline"] = sorted(baseline)
+            save_chat_state(state)
+
+
+def is_project_baseline_initialized() -> bool:
+    """True once the sync watcher has snapshotted the initial A0 context set."""
+    return "project_baseline" in load_chat_state()
+
+
+def detach_chat_and_topics(chat_id: str) -> list[dict]:
+    """Detach a chat and every topic underneath it.
+
+    Iterates all conv_keys in persistent state whose base chat matches
+    ``chat_id`` (i.e. ``chat_id`` itself and any ``{chat_id}:topic:*`` /
+    ``{chat_id}:user:*`` derivatives) and calls ``detach_conversation``
+    on each. Used when the bot is removed from a supergroup so every
+    topic inside it is cleaned up atomically.
+    """
+    state = load_chat_state()
+    prefix_colon = f"{chat_id}:"
+    targets: set[str] = set()
+    if chat_id in state.get("contexts", {}) or chat_id in state.get("topics", {}):
+        targets.add(chat_id)
+    for k in list(state.get("contexts", {}).keys()):
+        if k.startswith(prefix_colon):
+            targets.add(k)
+    for k in list(state.get("topics", {}).keys()):
+        if k.startswith(prefix_colon):
+            targets.add(k)
+    return [detach_conversation(k) for k in sorted(targets)]
+
+
 # Bot commands list (registered with Telegram on startup)
 BRIDGE_COMMANDS = [
     {"command": "auth",       "description": "Elevate to full Agent Zero access. Usage: /auth key"},
@@ -270,6 +397,13 @@ class ChatBridgeBot:
         self._cancel_requested: dict[str, bool] = {}
         # Last time a message was fully processed (unix timestamp); used by watchdog
         self._last_activity_ts: float = 0.0
+        # Project-sync watcher bookkeeping — populated once the loop starts.
+        self._project_sync_task: Optional[asyncio.Task] = None
+        self._project_sync_last_tick: float = 0.0
+        self._project_sync_last_error: Optional[str] = None
+        # Serializes manual + scheduled sync passes so a hand-triggered tick
+        # from the API can't race with the background loop.
+        self._project_sync_lock: Optional[asyncio.Lock] = None
 
     # ------------------------------------------------------------------
     # Config access
@@ -290,6 +424,26 @@ class ChatBridgeBot:
             max_concurrent = config.get("chat_bridge", {}).get("max_concurrent", 3)
             self._concurrency_sem = asyncio.Semaphore(max_concurrent)
         return self._concurrency_sem
+
+    # ------------------------------------------------------------------
+    # Debug trace
+    # ------------------------------------------------------------------
+
+    def _dbg(self, step: str, detail: str = "") -> None:
+        """Emit a `[DBG]` trace line at INFO level when the runtime flag is on.
+
+        Lets an operator watch a message flow through receive → filter →
+        agent → response in real time. The flag is toggled via
+        POST /api/plugins/telegram/telegram_bridge_api {"action":"set_debug"}
+        and seeded from ``chat_bridge.debug_mode`` on bridge startup.
+
+        Costs nothing when disabled — a single module-global bool check.
+        """
+        if _debug_mode:
+            line = f"[DBG] {step}"
+            if detail:
+                line += f" — {detail}"
+            logger.info(line)
 
     # ------------------------------------------------------------------
     # Session management
@@ -327,46 +481,135 @@ class ChatBridgeBot:
                 return True
         return False
 
+    def _ensure_linked_project(self, conv_key: str, display_name: str):
+        """Return a live Agent Zero context linked to ``conv_key``, creating one if needed.
+
+        This is the single source of truth for the Telegram↔A0 conversation
+        link. Used by DMs, flat groups, and topics alike — the conv_key
+        format already encodes which is which. Behaviour:
+
+        1. If a context id is persisted for ``conv_key`` AND that context
+           still exists in A0, return it unchanged. The link is sticky;
+           every subsequent message in the same conversation routes to the
+           same context.
+        2. Otherwise (no link yet, OR the linked context was deleted from
+           A0), create a fresh ``AgentContext(type=USER)``, persist the new
+           id via ``set_context_id``, and update the dashboard mapping via
+           ``set_topic_project`` so the UI stays in sync.
+
+        The only time this function swaps to a new context is when the old
+        one was explicitly destroyed (deleted in the A0 web UI, or wiped by
+        /newcontext). Transient errors (network, LLM timeout, etc.) do NOT
+        cause detachment — callers should never clear the link on generic
+        failures.
+
+        Returns the live ``AgentContext`` object. Raises if A0 isn't
+        importable or context creation itself fails — callers fall back to
+        HTTP mode in that case.
+        """
+        from agent import AgentContext, AgentContextType
+        from initialize import initialize_agent
+
+        existing_ctx_id = get_context_id(conv_key)
+        if existing_ctx_id:
+            try:
+                ctx = AgentContext.get(existing_ctx_id)
+            except Exception:
+                ctx = None
+            if ctx is not None:
+                # Live link — reuse. Back-fill the dashboard entry if it
+                # drifted out of sync (older state, manual edits, etc.).
+                existing_map = get_topic_project(conv_key) or {}
+                if existing_map.get("project_id") != existing_ctx_id:
+                    set_topic_project(
+                        conv_key, existing_ctx_id, display_name, auto_created=True,
+                    )
+                    logger.info(
+                        "Re-synced dashboard mapping for %s → project %s",
+                        conv_key, existing_ctx_id,
+                    )
+                return ctx
+            # Linked context was deleted in A0 (or never existed).  Fall
+            # through to create a fresh one and update both mappings so the
+            # dashboard no longer points at the dead project id.
+            logger.info(
+                "Linked context %s for %s no longer exists in A0 — "
+                "creating a replacement project",
+                existing_ctx_id, conv_key,
+            )
+
+        a0_config = initialize_agent()
+        ctx = AgentContext(config=a0_config, type=AgentContextType.USER)
+        set_context_id(conv_key, ctx.id)
+        set_topic_project(conv_key, ctx.id, display_name, auto_created=True)
+        logger.info(
+            "Created A0 project %s for conversation %s (name=%s)",
+            ctx.id, conv_key, display_name,
+        )
+        return ctx
+
+    def _conversation_display_name(self, chat_id: str, thread_id, message) -> str:
+        """Build a human-readable label for the dashboard.
+
+        Shared between ``_ensure_project_mapping`` and
+        ``_ensure_linked_project`` so DMs, flat groups, and topics all get
+        consistent names.
+        """
+        chat = getattr(message, "chat", None)
+        chat_type = getattr(chat, "type", "private") if chat else "private"
+        if chat_type == "private":
+            first = getattr(chat, "first_name", "") or ""
+            last = getattr(chat, "last_name", "") or ""
+            uname = getattr(chat, "username", "") or ""
+            name = f"DM: {first} {last}".strip()
+            if name == "DM:":
+                name = f"DM: @{uname}" if uname else f"DM: {chat_id}"
+            return name
+        if thread_id:
+            title = getattr(chat, "title", "") or chat_id
+            return f"{title} / topic {thread_id}"
+        return getattr(chat, "title", "") or f"Chat {chat_id}"
+
     def _ensure_project_mapping(self, conv_key: str, chat_id: str, thread_id, message):
-        """Register a project mapping for this conversation if one doesn't exist.
+        """Make sure this conversation is linked to a live A0 project.
 
-        Forum topics get a mapping created in `_on_forum_topic_created`. This
-        helper covers every other case (DMs, the general topic, group chats,
-        pre-existing topics) so the dashboard shows a unified list of all
-        active conversations and their project IDs.
+        Called on every incoming message (cheap — a dict lookup when the
+        link is already healthy). Uniformly handles DMs, flat groups, and
+        topics via ``_ensure_linked_project`` — the same eager-creation
+        path the forum_topic_created handler uses.
 
-        Idempotent — only writes when no mapping exists for the key.
+        The link is sticky: once established it survives across bridge
+        restarts (persisted to chat_bridge_state.json) and ONLY breaks if
+          - the A0 context is deleted via the web UI (detected lazily; we
+            then create a replacement and update the dashboard mapping), or
+          - the bot is removed from the chat on the Telegram side
+            (handled in ``_on_my_chat_member``), or
+          - the user runs /newcontext (explicit reset).
+
+        Transient errors (LLM timeouts, network blips, rate limits) NEVER
+        sever the link. Dashboard-bookkeeping errors are logged and
+        swallowed so they can't break message delivery.
         """
         try:
-            if get_topic_project(conv_key):
-                return  # already mapped
-
-            # Build a human-readable name based on the chat type
-            chat = getattr(message, "chat", None)
-            chat_type = getattr(chat, "type", "private") if chat else "private"
-            if chat_type == "private":
-                first = getattr(chat, "first_name", "") or ""
-                last = getattr(chat, "last_name", "") or ""
-                uname = getattr(chat, "username", "") or ""
-                name = (f"DM: {first} {last}".strip()
-                        or (f"DM: @{uname}" if uname else f"DM: {chat_id}"))
-            elif thread_id:
-                # Topic in a supergroup forum (general or specific)
-                title = getattr(chat, "title", "") or chat_id
-                name = f"{title} / topic {thread_id}"
-            else:
-                name = getattr(chat, "title", "") or f"Chat {chat_id}"
-
-            # Use the existing context_id (if any) as the project_id so the
-            # mapping points at the same A0 context the bridge is using.
-            project_id = get_context_id(conv_key) or conv_key
-            set_topic_project(conv_key, project_id, name, auto_created=True)
-            logger.info(
-                "Auto-mapped conversation %s → project %s (%s)",
-                conv_key, project_id, name,
-            )
+            name = self._conversation_display_name(chat_id, thread_id, message)
+            self._ensure_linked_project(conv_key, name)
+        except ImportError:
+            # A0 isn't importable (e.g. legacy HTTP-only mode). Fall back
+            # to the lightweight dashboard-only mapping using whatever
+            # context id is persisted — if any.
+            if not get_topic_project(conv_key):
+                try:
+                    name = self._conversation_display_name(chat_id, thread_id, message)
+                except Exception:
+                    name = conv_key
+                project_id = get_context_id(conv_key) or conv_key
+                set_topic_project(conv_key, project_id, name, auto_created=True)
+                logger.info(
+                    "Auto-mapped conversation %s → project %s (%s) [HTTP fallback]",
+                    conv_key, project_id, name,
+                )
         except Exception as e:
-            # Never let dashboard bookkeeping break message handling
+            # Never let project bookkeeping break message handling
             logger.debug("_ensure_project_mapping failed for %s: %s", conv_key, e)
 
     def _is_elevated(self, user_id: str, chat_id: str) -> bool:
@@ -608,15 +851,19 @@ class ChatBridgeBot:
 
     async def _on_message_inner(self, update, context_obj):
         """Core message-handling logic — called by _on_message with error wrapping."""
+        self._dbg("step 01 receive", f"update_id={getattr(update, 'update_id', '?')}")
         message = update.message
         if not message:
+            self._dbg("step 01 drop", "update has no .message attribute")
             return
         # Handle text OR voice/audio
         if not message.text and not message.voice and not message.audio and not message.document and not message.photo:
+            self._dbg("step 01 drop", "message has no text/voice/audio/document/photo content")
             return
 
         # Ignore own messages
         if message.from_user and message.from_user.is_bot:
+            self._dbg("step 02 drop", f"sender is a bot (@{getattr(message.from_user, 'username', '?')})")
             return
 
         chat_id = str(message.chat_id)
@@ -632,9 +879,15 @@ class ChatBridgeBot:
             "MSG recv: chat=%s type=%s thread=%s user=%s(%s) text=%r",
             chat_id, chat_type, thread_id, user_id, username or "?", preview,
         )
+        self._dbg(
+            "step 03 identified",
+            f"chat={chat_id} type={chat_type} thread={thread_id} "
+            f"user={user_id}(@{username or '?'}) msg_id={message.message_id}",
+        )
 
         # Store message for telegram_read tool access
         msg_text = (message.text or "").strip()
+        self._dbg("step 04 store", f"storing in message_store (skipped for ! and / prefixes); text_len={len(msg_text)}")
         if not msg_text.startswith("!") and not msg_text.startswith("/"):
             try:
                 from usr.plugins.telegram.helpers.message_store import store_message
@@ -669,11 +922,20 @@ class ChatBridgeBot:
 
         chat_list = get_chat_list()
         conv_key = _topic_key(chat_id, thread_id)
+        self._dbg(
+            "step 05 chat filter",
+            f"conv_key={conv_key} chat_list_size={len(chat_list)} "
+            f"{'(empty → allow every chat)' if not chat_list else f'keys={list(chat_list.keys())}'}",
+        )
 
         # Only respond in designated chats OR their topics
         if chat_list:
             # Check both the topic key and the base chat_id
             if conv_key not in chat_list and chat_id not in chat_list:
+                self._dbg(
+                    "step 05 DROP",
+                    f"chat {chat_id}/{conv_key} NOT in chat_list — message silently filtered",
+                )
                 logger.warning(
                     "DROP: chat %s (conv_key=%s, user %s) not in bridge chat_list=%s. "
                     "Add it with the telegram_chat tool (action=add) or empty the list "
@@ -681,12 +943,23 @@ class ChatBridgeBot:
                     chat_id, conv_key, user_id, list(chat_list.keys()),
                 )
                 return
+        self._dbg("step 05 pass", "chat filter passed; continuing to user allowlist")
 
         # User allowlist — accepts both numeric IDs and @username entries
         config = self._get_config()
         allowed_users = config.get("chat_bridge", {}).get("allowed_users", [])
         username = getattr(message.from_user, "username", "") if message.from_user else ""
+        self._dbg(
+            "step 06 user filter",
+            f"user={user_id}(@{username or '?'}) allowlist_size={len(allowed_users)} "
+            f"{'(empty → allow every user)' if not allowed_users else f'allowlist={[str(u) for u in allowed_users]}'}",
+        )
         if not self._user_is_allowed(user_id, username, allowed_users):
+            self._dbg(
+                "step 06 DROP",
+                f"user {user_id}(@{username or '?'}) not in allowed_users — "
+                "message silently filtered, not in user allow list",
+            )
             # WARNING (not DEBUG) so this is visible at default log level —
             # the #1 cause of "my messages don't work" is an allowlist entry
             # that doesn't match the sender.
@@ -698,11 +971,14 @@ class ChatBridgeBot:
                 [str(u) for u in allowed_users],
             )
             return
+        self._dbg("step 06 pass", "user allowlist passed; proceeding to content processing")
 
         # Determine user text (handle voice transcription)
         if message.voice or message.audio:
+            self._dbg("step 07 voice", "message is voice/audio — transcribing")
             voice_config = config.get("chat_bridge", {}).get("voice", {})
             if not voice_config.get("enabled", True):
+                self._dbg("step 07 DROP", "voice transcription disabled in config (chat_bridge.voice.enabled=false)")
                 return
             asyncio.create_task(_safe_react(
                 context_obj.bot, chat_id, message.message_id,
@@ -710,28 +986,40 @@ class ChatBridgeBot:
             ))
             user_text = await self._transcribe_voice(message)
             if not user_text:
+                self._dbg("step 07 DROP", "transcription returned empty; asking user to send text")
                 await message.reply_text("⚠️ Could not transcribe voice message. Please send text.")
                 return
             # Sanitize transcript before any further processing (prompt injection
             # defence mirrors the sanitization applied to typed text).
             from usr.plugins.telegram.helpers.sanitize import sanitize_content as _sc
             user_text = _sc(user_text)
+            self._dbg("step 07 transcribed", f"{len(user_text)} chars after sanitize")
         else:
             user_text = message.text
+            self._dbg("step 07 text", f"using plain text; {len(user_text or '')} chars")
 
         if not user_text or not user_text.strip():
+            self._dbg("step 08 DROP", "user_text empty after strip")
             return
 
         # Handle auth/command prefix first
         if user_text.strip().startswith("!"):
+            self._dbg("step 09 auth command", f"text starts with '!' — dispatching to _handle_auth_command: {user_text[:40]!r}")
             handled = await self._handle_auth_command(update, context_obj)
             if handled:
+                self._dbg("step 09 handled", "auth command consumed the message; returning")
                 return
+            self._dbg("step 09 pass", "not a recognised auth command; continuing as normal message")
 
         # Enforce content length
         if len(user_text) > self.MAX_CHAT_MESSAGE_LENGTH:
+            self._dbg(
+                "step 10 DROP",
+                f"message length {len(user_text)} exceeds MAX={self.MAX_CHAT_MESSAGE_LENGTH}",
+            )
             await message.reply_text(f"Message too long ({len(user_text)} chars). Max: {self.MAX_CHAT_MESSAGE_LENGTH}.")
             return
+        self._dbg("step 10 length OK", f"{len(user_text)} chars ≤ MAX {self.MAX_CHAT_MESSAGE_LENGTH}")
 
         # Per-user rate limiting (existing code)
         user_key = user_id
@@ -742,28 +1030,48 @@ class ChatBridgeBot:
         while timestamps and now - timestamps[0] > self.RATE_LIMIT_WINDOW:
             timestamps.popleft()
         if len(timestamps) >= self.RATE_LIMIT_MAX:
+            self._dbg(
+                "step 11 DROP",
+                f"rate limit: user={user_id} hit {self.RATE_LIMIT_MAX} msgs/{self.RATE_LIMIT_WINDOW}s",
+            )
             await message.reply_text(f"Rate limit: max {self.RATE_LIMIT_MAX} messages per {self.RATE_LIMIT_WINDOW}s.")
             return
         timestamps.append(now)
+        self._dbg(
+            "step 11 rate OK",
+            f"user={user_id} {len(timestamps)}/{self.RATE_LIMIT_MAX} in {self.RATE_LIMIT_WINDOW}s window",
+        )
 
         # TRACK 1: React 👍 (received) — fire and forget BEFORE semaphore
         # Config path: top-level "reactions" key (not nested under chat_bridge)
         reactions_config = config.get("reactions", {})
         if reactions_config.get("enabled", True):
+            self._dbg("step 12 react 👍", f"posting pre_react {reactions_config.get('pre_react', '👍')!r}")
             asyncio.create_task(_safe_react(
                 context_obj.bot, chat_id, message.message_id,
                 reactions_config.get("pre_react", "👍"), config
             ))
+        else:
+            self._dbg("step 12 react skip", "reactions disabled in config")
 
         # Show typing while waiting for semaphore
+        self._dbg("step 13 typing", "sending chat_action=typing")
         await context_obj.bot.send_chat_action(chat_id=chat_id, action="typing")
 
         is_elevated = self._is_elevated(user_id, chat_id)
+        self._dbg(
+            "step 14 mode",
+            f"is_elevated={is_elevated} "
+            f"({'full-agent loop (tools, web UI)' if is_elevated else 'restricted utility_model (no tools)'})",
+        )
 
         # TRACK 12: Concurrency semaphore
+        self._dbg("step 15 semaphore", "waiting to acquire concurrency semaphore")
         async with self._get_semaphore():
+            self._dbg("step 15 acquired", "semaphore acquired; processing starts")
             # TRACK 1: React 🤔 (thinking)
             if reactions_config.get("enabled", True):
+                self._dbg("step 16 react 🤔", "posting processing_react")
                 asyncio.create_task(_safe_react(
                     context_obj.bot, chat_id, message.message_id,
                     reactions_config.get("processing_react", "🤔"), config
@@ -783,10 +1091,12 @@ class ChatBridgeBot:
                 # Touch topic last-active timestamp
                 if thread_id:
                     touch_topic(_topic_key(chat_id, thread_id))
+                    self._dbg("step 17 topic touch", f"updated last-active for {_topic_key(chat_id, thread_id)}")
 
                 # Ensure a project mapping exists for this conversation so
                 # DMs, the general topic, and pre-existing topics show up in
                 # the dashboard alongside auto-created topic projects.
+                self._dbg("step 18 project map", f"ensuring project mapping for conv_key={conv_key2}")
                 self._ensure_project_mapping(
                     conv_key2, chat_id, thread_id, message,
                 )
@@ -795,18 +1105,35 @@ class ChatBridgeBot:
                     "MSG route: conv_key=%s mode=%s",
                     conv_key2, "full-agent" if is_elevated else "restricted",
                 )
+                self._dbg(
+                    "step 19 route",
+                    f"conv_key={conv_key2} → {'_get_elevated_response' if is_elevated else '_get_agent_response'} "
+                    f"(streaming_enabled={streaming_enabled}, per_user_context={per_user})",
+                )
 
                 if is_elevated:
+                    self._dbg("step 20 agent call", "invoking full agent loop (context.communicate)")
                     response_text = await self._get_elevated_response(
                         conv_key2, user_text, message, thread_id=thread_id
                     )
                 else:
+                    self._dbg("step 20 agent call", "invoking restricted utility_model (no tools)")
                     response_text = await self._get_agent_response(
                         conv_key2, user_text, message
                     )
+                self._dbg(
+                    "step 21 agent done",
+                    f"response_len={len(response_text) if response_text else 0} chars "
+                    f"preview={(response_text or '')[:80]!r}",
+                )
 
                 # TRACK 2: Streaming or normal send
                 if streaming_enabled and response_text:
+                    self._dbg(
+                        "step 22 send",
+                        f"streaming response to Telegram (mode={streaming_cfg.get('mode', 'sentence')}, "
+                        f"edit_interval_ms={streaming_cfg.get('edit_interval_ms', 1500)})",
+                    )
                     from usr.plugins.telegram.helpers.stream_response import stream_text_to_telegram
                     from usr.plugins.telegram.helpers.message_store import store_message as _store_msg
                     await stream_text_to_telegram(
@@ -820,7 +1147,9 @@ class ChatBridgeBot:
                         message_thread_id=thread_id,
                         store_callback=_store_msg,
                     )
+                    self._dbg("step 22 streamed", "stream completed")
                 else:
+                    self._dbg("step 22 send", "non-streaming single reply via _send_response")
                     sent_id = await self._send_response(message, response_text, thread_id=thread_id)
                     # Track sent reply for edited-message handling
                     if sent_id:
@@ -830,21 +1159,32 @@ class ChatBridgeBot:
                         if len(self._sent_replies) > 500:
                             oldest = next(iter(self._sent_replies))
                             del self._sent_replies[oldest]
+                        self._dbg("step 22 sent", f"bot reply message_id={sent_id}; tracked for edits")
+                    else:
+                        self._dbg("step 22 sent", "send returned no id (chunked or failed)")
 
                 # Update watchdog activity timestamp on successful response
                 self._last_activity_ts = time.time()
+                self._dbg("step 23 watchdog", f"activity ts updated to {self._last_activity_ts:.0f}")
 
                 # TRACK 1: React ✅ (done)
                 if reactions_config.get("enabled", True):
+                    self._dbg("step 24 react ✅", "posting success_react")
                     asyncio.create_task(_safe_react(
                         context_obj.bot, chat_id, message.message_id,
                         reactions_config.get("success_react", "✅"), config2
                     ))
+                self._dbg("step 25 done", f"message {message.message_id} fully processed")
 
             except Exception as e:
+                self._dbg(
+                    "step ERR agent",
+                    f"exception in processing block: {type(e).__name__}: {e}",
+                )
                 logger.error("Agent error: %s", type(e).__name__, exc_info=True)
                 # TRACK 1: React ❌ (error)
                 if reactions_config.get("enabled", True):
+                    self._dbg("step ERR react ❌", "posting failure_react")
                     asyncio.create_task(_safe_react(
                         context_obj.bot, chat_id, message.message_id,
                         reactions_config.get("failure_react", "❌"), config
@@ -858,20 +1198,14 @@ class ChatBridgeBot:
     async def _get_agent_response(self, conv_key: str, text: str, message) -> str:
         """Get LLM response via direct model call (no agent loop, no tools)."""
         try:
-            from agent import AgentContext, AgentContextType
-            from initialize import initialize_agent
-
-            context_id = get_context_id(conv_key)
-            context = None
-
-            if context_id:
-                context = AgentContext.get(context_id)
-
-            if context is None:
-                config = initialize_agent()
-                context = AgentContext(config=config, type=AgentContextType.USER)
-                set_context_id(conv_key, context.id)
-                logger.info(f"Created new context {context.id} for key {conv_key}")
+            # Delegate link management to _ensure_linked_project — same sticky
+            # context semantics as full-agent mode, so the link persists
+            # across restarts and only refreshes if the context was deleted
+            # in A0.
+            chat_id_str = str(message.chat_id) if hasattr(message, "chat_id") else conv_key.split(":")[0]
+            thread_id = getattr(message, "message_thread_id", None)
+            display_name = self._conversation_display_name(chat_id_str, thread_id, message)
+            context = self._ensure_linked_project(conv_key, display_name)
 
             agent = context.agent0
 
@@ -922,20 +1256,13 @@ class ChatBridgeBot:
     async def _get_elevated_response(self, conv_key: str, text: str, message, thread_id=None) -> str:
         """Route through the full Agent Zero agent loop."""
         try:
-            from agent import AgentContext, AgentContextType, UserMessage
-            from initialize import initialize_agent
+            from agent import UserMessage
 
-            context_id = get_context_id(conv_key)
-            context = None
-
-            if context_id:
-                context = AgentContext.get(context_id)
-
-            if context is None:
-                config = initialize_agent()
-                context = AgentContext(config=config, type=AgentContextType.USER)
-                set_context_id(conv_key, context.id)
-                logger.info(f"Created new elevated context {context.id} for key {conv_key}")
+            # Sticky link: reuse the same A0 context for every message in
+            # this conversation, unless it was explicitly deleted in A0.
+            chat_id_str = str(message.chat_id) if hasattr(message, "chat_id") else conv_key.split(":")[0]
+            display_name = self._conversation_display_name(chat_id_str, thread_id, message)
+            context = self._ensure_linked_project(conv_key, display_name)
 
             from usr.plugins.telegram.helpers.sanitize import sanitize_content
             safe_text = sanitize_content(text)
@@ -998,8 +1325,16 @@ class ChatBridgeBot:
             chat_id = conv_key.split(":")[0]
             return await self._get_agent_response_http(chat_id, text)
         except Exception as e:
-            logger.error("Elevated mode error: %s", type(e).__name__, exc_info=True)
-            set_context_id(conv_key, "")
+            # DO NOT clear the persistent link here.  Transient failures
+            # (LLM timeout, network blip, tool error) must not detach the
+            # conversation from its Agent Zero project — the link is only
+            # severed when the context is explicitly deleted in A0
+            # (detected lazily by _ensure_linked_project on the next
+            # message) or when the user runs /newcontext.
+            logger.error(
+                "Elevated mode error (link preserved): %s: %s",
+                type(e).__name__, e, exc_info=True,
+            )
             raise
 
     def _cleanup_temp_files(self):
@@ -1191,13 +1526,19 @@ class ChatBridgeBot:
 
     async def _on_callback_query_inner(self, update, context_obj):
         """Core callback-query logic — called with error wrapping."""
+        self._dbg("cb 01 receive", f"callback_query update_id={getattr(update, 'update_id', '?')}")
         query = update.callback_query
         if not query:
+            self._dbg("cb 01 drop", "update has no .callback_query")
             return
 
         user_id = str(query.from_user.id) if query.from_user else "unknown"
         chat_id = str(query.message.chat_id) if query.message else "unknown"
         data = query.data or ""
+        self._dbg(
+            "cb 02 identified",
+            f"chat={chat_id} user={user_id} data={data!r}",
+        )
 
         # Always answer immediately to clear the loading spinner
         try:
@@ -1210,11 +1551,17 @@ class ChatBridgeBot:
         allowed_users = config.get("chat_bridge", {}).get("allowed_users", [])
         username = getattr(query.from_user, "username", "") if query.from_user else ""
         if not self._user_is_allowed(user_id, username, allowed_users):
+            self._dbg(
+                "cb 03 DROP",
+                f"user {user_id}(@{username or '?'}) not in allowed_users — "
+                "callback silently filtered, not in user allow list",
+            )
             logger.warning(
                 "DROP callback: user %s (@%s) not in allowed_users=%s",
                 user_id, username or "?", [str(u) for u in allowed_users],
             )
             return
+        self._dbg("cb 03 pass", "user allowlist passed; processing button action")
 
         message_id = query.message.message_id
         approval_key = f"{chat_id}:{message_id}"
@@ -1320,18 +1667,24 @@ class ChatBridgeBot:
 
     async def _on_edited_message_inner(self, update, context_obj):
         """Core edited-message logic — called with error wrapping."""
+        self._dbg("edit 01 receive", f"edited_message update_id={getattr(update, 'update_id', '?')}")
         message = update.edited_message
         if not message or not message.text:
+            self._dbg("edit 01 drop", "no edited_message or empty text")
             return
 
         config = self._get_config()
         if not config.get("chat_bridge", {}).get("handle_edited_messages", True):
+            self._dbg("edit 02 DROP", "handle_edited_messages disabled in config")
             return
 
         # Only re-process recent edits
         window = config.get("chat_bridge", {}).get("edited_message_window", 600)
-        if time.time() - message.date.timestamp() > window:
+        age = time.time() - message.date.timestamp()
+        if age > window:
+            self._dbg("edit 03 DROP", f"edit is {age:.0f}s old; window={window}s — too stale")
             return
+        self._dbg("edit 03 pass", f"edit age={age:.0f}s ≤ {window}s; re-processing as new message")
 
         chat_id = str(message.chat_id)
 
@@ -1369,40 +1722,55 @@ class ChatBridgeBot:
 
     async def _on_forum_topic_created_inner(self, update, context_obj):
         """Core forum-topic-created logic — called with error wrapping."""
+        self._dbg("topic 01 receive", f"forum_topic_created update_id={getattr(update, 'update_id', '?')}")
         message = update.message
         if not message:
+            self._dbg("topic 01 drop", "no .message on update")
             return
 
         topic_info = getattr(message, "forum_topic_created", None)
         if not topic_info:
+            self._dbg("topic 02 drop", "message has no forum_topic_created field")
             return
 
         chat_id = str(message.chat_id)
         thread_id = message.message_thread_id
         topic_name = getattr(topic_info, "name", f"Topic {thread_id}")
         topic_key = _topic_key(chat_id, thread_id)
+        self._dbg(
+            "topic 03 identified",
+            f"chat={chat_id} thread={thread_id} topic_name={topic_name!r} key={topic_key}",
+        )
 
         config = self._get_config()
         if not config.get("supergroups", {}).get("auto_context_on_new_topic", True):
+            self._dbg("topic 04 DROP", "supergroups.auto_context_on_new_topic disabled in config")
             return
 
         # Don't duplicate if already mapped
         if get_topic_project(topic_key):
+            self._dbg("topic 05 skip", f"topic {topic_key} already has a project mapping; no action")
             return
+        self._dbg("topic 05 pass", "no existing mapping; creating new A0 project context")
 
         logger.info(f"New forum topic: {topic_name} (key={topic_key})")
 
-        # Create a new A0 context for this topic
+        # Delegate to the shared helper so creation-time and first-message
+        # topic bootstrapping follow the exact same code path — guarantees
+        # the dashboard project_id stays in sync with the A0 context id,
+        # and that later messages in this topic reuse this context.
         try:
-            from agent import AgentContext, AgentContextType
-            from initialize import initialize_agent
-            a0_config = initialize_agent()
-            context = AgentContext(config=a0_config, type=AgentContextType.USER)
-            set_context_id(topic_key, context.id)
-            set_topic_project(topic_key, context.id, topic_name, auto_created=True)
-            logger.info(f"Created context {context.id} for topic {topic_key}")
+            ctx = self._ensure_linked_project(topic_key, topic_name)
+            self._dbg("topic 06 linked", f"topic {topic_key} → project {ctx.id}")
+        except ImportError:
+            # A0 not importable — fall back to synthesized dashboard mapping.
+            set_topic_project(topic_key, topic_key, topic_name, auto_created=True)
+            self._dbg("topic 06 fallback", "A0 unavailable; dashboard mapping only")
         except Exception as e:
-            logger.warning(f"Could not create context for topic {topic_key}: {e}")
+            logger.warning(
+                "Could not create A0 project for topic %s: %s: %s",
+                topic_key, type(e).__name__, e,
+            )
             set_topic_project(topic_key, topic_key, topic_name, auto_created=True)
 
         # Optionally react with 🎉
@@ -1413,11 +1781,425 @@ class ChatBridgeBot:
             ))
 
     # ------------------------------------------------------------------
+    # Membership change handler — detach on Telegram-side removal
+    # ------------------------------------------------------------------
+
+    async def _on_my_chat_member(self, update, context_obj):
+        """Detect when the bot itself is removed from a chat and clean up.
+
+        Fires on ``my_chat_member`` updates — Telegram sends these whenever
+        the bot's own membership status in a chat changes (user kicks the
+        bot, admin revokes it, bot leaves, DM is blocked, etc.).
+
+        When the new status indicates the bot is no longer active in the
+        chat (``left``, ``kicked``, ``banned``), every persistent link
+        rooted at that chat is severed via ``detach_chat_and_topics``:
+          - the chat's context mapping
+          - every topic's context mapping under that chat
+          - every matching topic_project dashboard entry
+
+        The A0 contexts themselves are NOT deleted — users can still find
+        them in the web UI. Only the Telegram↔A0 link is broken, matching
+        the rule "link persists until the chat is archived/deleted in
+        Telegram or Agent Zero".
+        """
+        try:
+            await self._on_my_chat_member_inner(update, context_obj)
+        except Exception as e:
+            logger.error(
+                "_on_my_chat_member unhandled error (update_id=%s): %s: %s",
+                getattr(update, "update_id", "N/A"), type(e).__name__, e, exc_info=True,
+            )
+
+    async def _on_my_chat_member_inner(self, update, context_obj):
+        self._dbg("member 01 receive", f"my_chat_member update_id={getattr(update, 'update_id', '?')}")
+        mcm = getattr(update, "my_chat_member", None)
+        if mcm is None:
+            self._dbg("member 01 drop", "no my_chat_member payload")
+            return
+        new = getattr(mcm, "new_chat_member", None)
+        old = getattr(mcm, "old_chat_member", None)
+        new_status = getattr(new, "status", None) if new else None
+        old_status = getattr(old, "status", None) if old else None
+        chat = getattr(mcm, "chat", None)
+        chat_id = str(getattr(chat, "id", "?"))
+        chat_title = getattr(chat, "title", None) or getattr(chat, "username", None) or chat_id
+        self._dbg(
+            "member 02 status",
+            f"chat={chat_id}({chat_title}) {old_status!r} → {new_status!r}",
+        )
+
+        # Statuses that mean "bot is no longer a member / can't post".
+        # See https://core.telegram.org/bots/api#chatmember for the full set.
+        inactive = {"left", "kicked", "banned"}
+        if new_status not in inactive:
+            self._dbg("member 03 active", "bot is still active in chat; no detach")
+            return
+        # Only act on the transition *into* the inactive state — skip
+        # repeats of an already-inactive status to avoid spurious log noise.
+        if old_status in inactive:
+            self._dbg("member 03 noop", f"old_status {old_status!r} already inactive; skipping")
+            return
+
+        logger.warning(
+            "Bot removed from chat %s (%s): %s → %s — detaching all linked A0 projects",
+            chat_id, chat_title, old_status, new_status,
+        )
+        self._dbg("member 04 detach", f"calling detach_chat_and_topics({chat_id})")
+
+        removed = detach_chat_and_topics(chat_id)
+        detached_count = sum(
+            1 for r in removed
+            if r.get("removed_context_id") or r.get("removed_topic_mapping")
+        )
+        logger.info(
+            "Detached %d conversation(s) under chat %s: %s",
+            detached_count, chat_id,
+            [r["conv_key"] for r in removed
+             if r.get("removed_context_id") or r.get("removed_topic_mapping")],
+        )
+        self._dbg(
+            "member 05 done",
+            f"detached {detached_count} conv(s); A0 contexts preserved (dashboard links only)",
+        )
+
+        # Also drop the chat from the bridge chat_list so the filter in
+        # _on_message_inner stops trying to accept messages from it
+        # (Telegram won't deliver any anyway, but keep state tidy).
+        try:
+            if chat_id in get_chat_list():
+                remove_chat(chat_id)
+                logger.info("Removed chat %s from bridge chat_list", chat_id)
+        except Exception as e:
+            logger.debug("Could not remove chat %s from chat_list: %s", chat_id, e)
+
+    # ------------------------------------------------------------------
+    # Bi-directional project ↔ topic sync (A0 web UI → Telegram topics)
+    # ------------------------------------------------------------------
+    #
+    # When ``project_sync.enabled`` is true and a valid ``supergroup_id`` is
+    # configured, a background loop polls ``AgentContext.all()`` every
+    # ``poll_interval`` seconds and mirrors changes into the Telegram
+    # supergroup:
+    #
+    #   * A0 context created in web UI → new forum topic in TG
+    #   * A0 context archived / deleted → topic closed or deleted in TG
+    #
+    # Pair with ``supergroups.auto_context_on_new_topic`` (on by default) so
+    # the reverse direction — creating a topic in Telegram makes an A0
+    # project — also works. Together they give true two-way mirroring.
+    #
+    # First run behaviour: if ``project_baseline`` has never been set in
+    # chat_bridge_state.json, the first sync tick snapshots every current
+    # A0 context id into the baseline and does NOT create topics for them.
+    # Only contexts that appear AFTER the baseline is captured get mirrored.
+    # Users who want to back-fill can flip ``sync_existing: true`` in config
+    # to force the initial pass to also create topics for pre-existing
+    # contexts.
+
+    async def _project_sync_tick(self) -> dict:
+        """Run one pass of the A0 → Telegram project sync.
+
+        Returns a dict summarising what happened in this pass so the API
+        can surface it to the WebUI. Exceptions are caught and reported in
+        the ``error`` field — the caller (``_project_sync_loop``) never
+        crashes on transient A0 or Telegram failures.
+        """
+        import time
+        summary: dict = {
+            "ok": True,
+            "enabled": False,
+            "created_topics": [],
+            "closed_topics": [],
+            "deleted_topics": [],
+            "ignored": 0,
+            "baseline_initialized": False,
+            "error": None,
+        }
+
+        cfg = self._get_config().get("project_sync", {}) or {}
+        if not cfg.get("enabled", False):
+            return summary  # Disabled — nothing to do.
+        summary["enabled"] = True
+
+        supergroup_id = str(cfg.get("supergroup_id", "") or "").strip()
+        if not supergroup_id:
+            summary["ok"] = False
+            summary["error"] = "project_sync.enabled but supergroup_id is unset"
+            return summary
+
+        archive_action = (cfg.get("archive_action", "close") or "close").lower()
+        if archive_action not in ("close", "delete"):
+            archive_action = "close"
+        sync_existing = bool(cfg.get("sync_existing", False))
+        ignore_prefixes = list(cfg.get("name_ignore_prefixes", []) or [])
+
+        # Enumerate current A0 contexts. Failure here is fatal for this
+        # pass but the watcher will retry on the next tick.
+        try:
+            from agent import AgentContext
+        except Exception as e:
+            summary["ok"] = False
+            summary["error"] = f"A0 not importable: {type(e).__name__}: {e}"
+            return summary
+
+        try:
+            current_contexts = list(AgentContext.all())
+        except Exception as e:
+            summary["ok"] = False
+            summary["error"] = f"AgentContext.all() failed: {type(e).__name__}: {e}"
+            return summary
+
+        # Only consider USER contexts (skip transient ones — schedules, MCP,
+        # etc.).  Agent Zero's AgentContext has a `type` attribute that is
+        # the AgentContextType enum value; treat anything non-USER as noise
+        # for the mirror.  If the attribute is missing we keep the context
+        # (back-compat with older A0 versions).
+        try:
+            from agent import AgentContextType
+            _user_type = AgentContextType.USER
+        except Exception:
+            _user_type = None
+
+        def _is_user_ctx(c) -> bool:
+            if _user_type is None:
+                return True
+            ctx_type = getattr(c, "type", None)
+            return ctx_type is None or ctx_type == _user_type
+
+        contexts = [c for c in current_contexts if _is_user_ctx(c)]
+        current_ids = {c.id for c in contexts}
+
+        # --- Phase 0: baseline bootstrap (run-once, or every time if user
+        #               explicitly asked for sync_existing).
+        baseline_existed = is_project_baseline_initialized()
+        if not baseline_existed:
+            if sync_existing:
+                # The operator wants a full back-fill — initialise the
+                # baseline as EMPTY so every current context looks "new"
+                # in Phase 1 and gets a topic.
+                set_project_baseline([])
+                logger.info(
+                    "project_sync: baseline initialized as empty (sync_existing=true) "
+                    "— will create topics for %d pre-existing context(s) on this pass.",
+                    len(contexts),
+                )
+            else:
+                # Default: record everything we already see so we don't
+                # retroactively spam topics. Only contexts that appear
+                # AFTER this moment will be mirrored.
+                set_project_baseline(current_ids)
+                summary["baseline_initialized"] = True
+                summary["ignored"] = len(contexts)
+                logger.info(
+                    "project_sync: baseline initialized with %d pre-existing context(s); "
+                    "future contexts will be mirrored to supergroup %s.",
+                    len(contexts), supergroup_id,
+                )
+                return summary
+
+        baseline = get_project_baseline()
+
+        # --- Phase 1: create topics for newly-added contexts.
+        for ctx in contexts:
+            try:
+                ctx_id = ctx.id
+                if ctx_id in baseline:
+                    continue  # Pre-existing, honoured by baseline contract.
+                if get_conv_key_for_context(ctx_id):
+                    continue  # Already linked to a TG conversation.
+                name = (getattr(ctx, "name", None) or "").strip()
+                if not name:
+                    # Use ctx_id as fallback so something meaningful appears.
+                    name = f"Project {ctx_id[:8]}"
+                if any(name.startswith(p) for p in ignore_prefixes):
+                    logger.debug(
+                        "project_sync: skipping context %s (%s) — "
+                        "name matches ignore prefix",
+                        ctx_id, name,
+                    )
+                    # Add to baseline so we don't re-check on every tick.
+                    add_to_project_baseline(ctx_id)
+                    continue
+
+                # Create the Telegram forum topic.
+                topic = await self._application.bot.create_forum_topic(
+                    chat_id=supergroup_id, name=name[:128],
+                )
+                thread_id = getattr(topic, "message_thread_id", None)
+                if thread_id is None:
+                    # PTB returns a ForumTopic object; older versions may
+                    # return a dict. Handle both.
+                    try:
+                        thread_id = topic["message_thread_id"]
+                    except Exception:
+                        thread_id = None
+                if thread_id is None:
+                    raise RuntimeError("createForumTopic returned no message_thread_id")
+
+                conv_key = f"{supergroup_id}:topic:{int(thread_id)}"
+                set_context_id(conv_key, ctx_id)
+                set_topic_project(conv_key, ctx_id, name, auto_created=True)
+                logger.info(
+                    "project_sync: created Telegram topic %s (thread=%s) for A0 context %s",
+                    name, thread_id, ctx_id,
+                )
+                summary["created_topics"].append({
+                    "context_id": ctx_id,
+                    "thread_id": int(thread_id),
+                    "name": name,
+                    "conv_key": conv_key,
+                })
+            except Exception as e:
+                logger.error(
+                    "project_sync: failed to create topic for context %s: %s: %s",
+                    getattr(ctx, "id", "?"), type(e).__name__, e,
+                )
+                summary["ok"] = False
+                if summary["error"] is None:
+                    summary["error"] = f"create_topic {getattr(ctx, 'id', '?')}: {type(e).__name__}: {e}"
+
+        # --- Phase 2: close / delete topics whose context is gone.
+        # Iterate every mapping rooted at our supergroup_id; for each,
+        # look up the context id — if A0 says it's gone, tear down the topic.
+        state = load_chat_state()
+        prefix = f"{supergroup_id}:topic:"
+        for conv_key, ctx_id in list((state.get("contexts") or {}).items()):
+            if not conv_key.startswith(prefix):
+                continue
+            if not ctx_id:
+                continue
+            if ctx_id in current_ids:
+                continue  # Still alive.
+            # Context no longer exists in A0 — tear down.
+            try:
+                thread_id_str = conv_key[len(prefix):]
+                thread_id = int(thread_id_str)
+            except (ValueError, TypeError):
+                logger.debug("project_sync: skipping malformed conv_key %s", conv_key)
+                continue
+
+            try:
+                if archive_action == "delete":
+                    await self._application.bot.delete_forum_topic(
+                        chat_id=supergroup_id, message_thread_id=thread_id,
+                    )
+                    summary["deleted_topics"].append({
+                        "context_id": ctx_id,
+                        "thread_id": thread_id,
+                        "conv_key": conv_key,
+                    })
+                    logger.info(
+                        "project_sync: deleted Telegram topic (thread=%s) — "
+                        "A0 context %s was removed",
+                        thread_id, ctx_id,
+                    )
+                else:
+                    await self._application.bot.close_forum_topic(
+                        chat_id=supergroup_id, message_thread_id=thread_id,
+                    )
+                    summary["closed_topics"].append({
+                        "context_id": ctx_id,
+                        "thread_id": thread_id,
+                        "conv_key": conv_key,
+                    })
+                    logger.info(
+                        "project_sync: closed Telegram topic (thread=%s) — "
+                        "A0 context %s was removed (archive_action=close)",
+                        thread_id, ctx_id,
+                    )
+                # Remove the mapping either way — the context is gone so the
+                # link is meaningless. For close, a user who manually
+                # reopens the topic will get a fresh A0 project on the
+                # next message (via _ensure_linked_project).
+                detach_conversation(conv_key)
+            except Exception as e:
+                # Treat 400 Bad Request "topic not found" as already-gone
+                # and clean up the mapping so we don't retry forever.
+                msg = str(e)
+                if "not found" in msg.lower() or "not modified" in msg.lower():
+                    logger.info(
+                        "project_sync: topic %s already gone from Telegram — detaching mapping",
+                        thread_id,
+                    )
+                    detach_conversation(conv_key)
+                    continue
+                logger.error(
+                    "project_sync: failed to %s topic %s (ctx=%s): %s: %s",
+                    archive_action, thread_id, ctx_id, type(e).__name__, e,
+                )
+                summary["ok"] = False
+                if summary["error"] is None:
+                    summary["error"] = f"{archive_action}_topic {thread_id}: {type(e).__name__}: {e}"
+
+        # Record tick bookkeeping for status endpoint.
+        self._project_sync_last_tick = time.time()
+        self._project_sync_last_error = summary["error"]
+        return summary
+
+    async def _project_sync_loop(self) -> None:
+        """Background coroutine: call ``_project_sync_tick`` on every poll.
+
+        Re-reads config each iteration so the operator can toggle
+        ``project_sync.enabled`` or change ``poll_interval`` without
+        restarting the bridge. A disabled sync still ticks once per 30 s
+        so re-enabling is picked up promptly; an enabled sync honours
+        ``poll_interval``.
+
+        Silent while disabled (no log spam). Errors in ``_project_sync_tick``
+        are reported inside the returned summary dict — this loop only
+        guards against programmer errors that escape the try/except there.
+        """
+        # Lazy-init lock on the loop thread so it binds to the right event loop.
+        if self._project_sync_lock is None:
+            self._project_sync_lock = asyncio.Lock()
+
+        logger.info(
+            "project_sync: watcher coroutine started (BRIDGE_CODE_VERSION=%s).",
+            BRIDGE_CODE_VERSION,
+        )
+        while self._running:
+            cfg = self._get_config().get("project_sync", {}) or {}
+            enabled = bool(cfg.get("enabled", False))
+            interval = int(cfg.get("poll_interval", 15) or 15)
+            if interval < 5:
+                interval = 5  # Sanity floor — Telegram rate limits otherwise.
+
+            if not enabled:
+                # Idle sleep — quick wake so enabling the feature is picked up fast.
+                await asyncio.sleep(30)
+                continue
+
+            try:
+                async with self._project_sync_lock:
+                    summary = await self._project_sync_tick()
+                if summary.get("created_topics") or summary.get("closed_topics") or summary.get("deleted_topics"):
+                    logger.info(
+                        "project_sync tick: +%d new, -%d closed, -%d deleted%s",
+                        len(summary.get("created_topics", [])),
+                        len(summary.get("closed_topics", [])),
+                        len(summary.get("deleted_topics", [])),
+                        f" (error: {summary['error']})" if summary.get("error") else "",
+                    )
+            except Exception as e:
+                # Shouldn't happen — _project_sync_tick catches everything.
+                logger.error(
+                    "project_sync: unexpected error in watcher loop: %s: %s",
+                    type(e).__name__, e, exc_info=True,
+                )
+                self._project_sync_last_error = f"{type(e).__name__}: {e}"
+
+            await asyncio.sleep(interval)
+
+        logger.info("project_sync: watcher coroutine exiting (bridge stopping).")
+
+    # ------------------------------------------------------------------
     # Bot command handlers (Track 6)
     # ------------------------------------------------------------------
 
     async def _cmd_auth(self, update, context_obj):
         """Handle /auth <key> command."""
+        self._dbg("cmd /auth", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             raw = (update.message.text or "") if update.message else ""
             # Convert "/auth key" → "!auth key" without mutating the immutable
@@ -1429,6 +2211,7 @@ class ChatBridgeBot:
             await self._safe_reply(update, "⚠️ An error occurred processing /auth. Please try again.")
 
     async def _cmd_deauth(self, update, context_obj):
+        self._dbg("cmd /deauth", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             await self._handle_auth_command(update, context_obj, text_override="!deauth")
         except Exception as e:
@@ -1436,6 +2219,7 @@ class ChatBridgeBot:
             await self._safe_reply(update, "⚠️ An error occurred processing /deauth. Please try again.")
 
     async def _cmd_status(self, update, context_obj):
+        self._dbg("cmd /status", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             await self._handle_auth_command(update, context_obj, text_override="!bridge-status")
         except Exception as e:
@@ -1443,6 +2227,7 @@ class ChatBridgeBot:
             await self._safe_reply(update, "⚠️ An error occurred processing /status. Please try again.")
 
     async def _cmd_help(self, update, context_obj):
+        self._dbg("cmd /help", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             config = self._get_config()
             bridge_cfg = config.get("chat_bridge", {})
@@ -1480,6 +2265,7 @@ class ChatBridgeBot:
             await self._safe_reply(update, "⚠️ An error occurred processing /help. Please try again.")
 
     async def _cmd_newcontext(self, update, context_obj):
+        self._dbg("cmd /newcontext", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             chat_id = str(update.message.chat_id)
             thread_id = getattr(update.message, "message_thread_id", None)
@@ -1494,6 +2280,7 @@ class ChatBridgeBot:
             await self._safe_reply(update, "⚠️ An error occurred resetting context. Please try again.")
 
     async def _cmd_cancel(self, update, context_obj):
+        self._dbg("cmd /cancel", f"user={getattr(getattr(update.message, 'from_user', None), 'id', '?')}")
         try:
             chat_id = str(update.message.chat_id)
             thread_id = getattr(update.message, "message_thread_id", None)
@@ -1643,7 +2430,10 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             from telegram.ext import ApplicationBuilder, MessageHandler, filters
 
         import telegram.error as tg_error
-        from telegram.ext import CallbackQueryHandler, CommandHandler, TypeHandler
+        from telegram.ext import (
+            CallbackQueryHandler, CommandHandler, TypeHandler,
+            ChatMemberHandler,
+        )
         from telegram import Update as _TGUpdate
 
         app = ApplicationBuilder().token(bot.bot_token).build()
@@ -1689,6 +2479,13 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
         app.add_handler(CommandHandler("newcontext", bot._cmd_newcontext))
         app.add_handler(CommandHandler("cancel",     bot._cmd_cancel))
 
+        # Bot membership changes — detach project links when the bot is
+        # removed/kicked from a chat on the Telegram side, so stale
+        # mappings don't linger in the dashboard forever.
+        app.add_handler(ChatMemberHandler(
+            bot._on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER,
+        ))
+
         # Global error handler — catches all unhandled exceptions in any
         # handler and logs them with full context instead of PTB's default
         # "No error handlers are registered" warning.
@@ -1722,6 +2519,13 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
                 allowed_users = bridge_cfg.get("allowed_users", []) or []
                 full_agent = bridge_cfg.get("full_agent_mode", True)
 
+                # Seed the runtime debug-trace flag from config.  The API can
+                # flip it at any time after startup; this just sets the
+                # initial value so an operator who wants traces from the very
+                # first message can enable it via config without touching UI.
+                debug_mode_cfg = bool(bridge_cfg.get("debug_mode", False))
+                set_debug_mode(debug_mode_cfg)
+
                 # Classify allowlist entries so misuse jumps out in the log.
                 numeric_ids = [str(u) for u in allowed_users if str(u).strip().isdigit()]
                 at_usernames = [str(u) for u in allowed_users
@@ -1731,6 +2535,9 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
                 logger.info("Chat bridge startup — BRIDGE_CODE_VERSION=%s", BRIDGE_CODE_VERSION)
                 logger.info("  Bot:             @%s (ID: %s)", me.username, me.id)
                 logger.info("  full_agent_mode: %s", full_agent)
+                logger.info("  debug_mode:      %s %s",
+                            debug_mode_cfg,
+                            "(verbose [DBG] trace per message)" if debug_mode_cfg else "")
                 logger.info("  chat_list:       %d entries %s",
                             len(chat_list_keys),
                             "(EMPTY → respond in every chat)" if not chat_list_keys
@@ -1784,11 +2591,46 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
                         "message", "edited_message", "callback_query",
                         "message_reaction", "forum_topic_created",
                         "forum_topic_edited", "forum_topic_closed", "forum_topic_reopened",
+                        # my_chat_member fires when the bot's own membership
+                        # changes (added/removed/kicked) — used to detach
+                        # project links when a chat is deleted Telegram-side.
+                        "my_chat_member",
                     ],
                 )
+
+                # Launch the A0 ↔ Telegram project-sync watcher. It runs
+                # regardless of the `project_sync.enabled` flag (the loop
+                # itself checks the flag each tick and idles when
+                # disabled) so toggling the feature at runtime doesn't
+                # require a bridge restart.
+                try:
+                    bot._project_sync_task = asyncio.create_task(
+                        bot._project_sync_loop(),
+                        name="telegram-project-sync",
+                    )
+                except Exception as _psy_exc:
+                    logger.warning(
+                        "Could not launch project_sync watcher: %s: %s",
+                        type(_psy_exc).__name__, _psy_exc, exc_info=True,
+                    )
+
                 # Keep running until _running is cleared by stop_chat_bridge()
                 while bot._running:
                     await asyncio.sleep(1)
+
+                # Cancel the sync watcher so the event loop can shut down cleanly.
+                try:
+                    task = bot._project_sync_task
+                    if task is not None and not task.done():
+                        task.cancel()
+                        try:
+                            await asyncio.wait_for(task, timeout=5)
+                        except (asyncio.CancelledError, asyncio.TimeoutError):
+                            pass
+                    bot._project_sync_task = None
+                except Exception as _pc_exc:
+                    logger.debug("project_sync cancel during shutdown: %s", _pc_exc)
+
                 await app.updater.stop()
 
             finally:
@@ -2000,3 +2842,59 @@ def get_bridge_application():
     if _bot_instance is not None and _bot_instance._application is not None:
         return _bot_instance._application
     return None
+
+
+def trigger_project_sync_tick(timeout: float = 30.0) -> dict:
+    """Run one ``_project_sync_tick`` synchronously from a non-bridge thread.
+
+    The bridge bot runs inside its own threading.Thread with a private
+    asyncio loop (``_bot_loop``). External callers (Flask API workers)
+    need ``run_coroutine_threadsafe`` to execute a coroutine on that
+    loop. This helper wraps the plumbing and returns the tick summary.
+    """
+    global _bot_instance, _bot_loop
+    if _bot_instance is None or _bot_loop is None:
+        return {"ok": False, "error": "bridge is not running"}
+    try:
+        coro = _bot_instance._project_sync_tick()
+        fut = asyncio.run_coroutine_threadsafe(coro, _bot_loop)
+        return fut.result(timeout=timeout)
+    except Exception as e:
+        logger.error(
+            "trigger_project_sync_tick failed: %s: %s",
+            type(e).__name__, e, exc_info=True,
+        )
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def get_project_sync_status() -> dict:
+    """Return a snapshot of the project-sync watcher's current state."""
+    from datetime import datetime, timezone
+    if _bot_instance is None:
+        return {"running": False, "reason": "bridge not running"}
+    task = getattr(_bot_instance, "_project_sync_task", None)
+    task_alive = bool(task is not None and not task.done())
+    last_tick_ts = getattr(_bot_instance, "_project_sync_last_tick", 0.0) or 0.0
+    last_tick_iso = (
+        datetime.fromtimestamp(last_tick_ts, tz=timezone.utc).isoformat()
+        if last_tick_ts else None
+    )
+    cfg = {}
+    try:
+        from usr.plugins.telegram.helpers.telegram_client import get_telegram_config
+        cfg = (get_telegram_config() or {}).get("project_sync", {}) or {}
+    except Exception:
+        pass
+    return {
+        "running": task_alive,
+        "enabled": bool(cfg.get("enabled", False)),
+        "supergroup_id": str(cfg.get("supergroup_id", "") or ""),
+        "archive_action": cfg.get("archive_action", "close"),
+        "poll_interval": int(cfg.get("poll_interval", 15) or 15),
+        "sync_existing": bool(cfg.get("sync_existing", False)),
+        "baseline_initialized": is_project_baseline_initialized(),
+        "baseline_size": len(get_project_baseline()),
+        "last_tick_ts": last_tick_ts,
+        "last_tick_iso": last_tick_iso,
+        "last_error": getattr(_bot_instance, "_project_sync_last_error", None),
+    }

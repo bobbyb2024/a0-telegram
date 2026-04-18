@@ -77,6 +77,24 @@
                         Refresh Status
                     </button>
                 </div>
+
+                <!-- Debug trace toggle -->
+                <div style="margin-top: 12px; padding: 10px; background: var(--bg-secondary, #f8f9fa); border-radius: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px;">
+                        <input type="checkbox"
+                               :checked="$store.tgMain.debugMode"
+                               @change="$store.tgMain.toggleDebug($event.target.checked)"
+                               style="cursor: pointer; width: 16px; height: 16px;">
+                        <span style="font-weight: 600; color: #37474f;">Debug trace</span>
+                        <span style="font-size: 10px; font-weight: 400; color: var(--text-secondary, #888);">
+                            emits [DBG] log lines for every step of every message
+                        </span>
+                    </label>
+                    <span x-show="$store.tgMain.debugMode"
+                          style="font-size: 10px; color: #2e7d32; font-weight: 600;">
+                        &#9679; TRACING
+                    </span>
+                </div>
             </div>
 
             <!-- Forum Topics Section -->
@@ -151,6 +169,9 @@ createStore('tgMain', {
     // Fatal error (invalid token, etc.)
     fatalError: '',
 
+    // Debug-trace flag (runtime, not persisted to config unless user edits file)
+    debugMode: false,
+
     // Forum topics panel
     topicsData: null,
     topicsEmpty: false,
@@ -172,6 +193,9 @@ createStore('tgMain', {
         if (data.topic_count !== undefined) this.topicCount = data.topic_count;
         if (data.restart_count !== undefined) this.restartCount = data.restart_count;
         this.webhookMode = data.webhook_mode ? 'Webhook' : 'Polling';
+
+        // Reflect the runtime debug-trace flag returned by the status action
+        if (data.debug_mode !== undefined) this.debugMode = !!data.debug_mode;
 
         // Surface fatal errors (e.g. invalid/revoked token) prominently
         this.fatalError = (data.status === 'error' && data.error) ? data.error : '';
@@ -240,6 +264,30 @@ createStore('tgMain', {
             }
         } catch {
             toastFrontendError('API unavailable');
+        }
+    },
+
+    async toggleDebug(enabled) {
+        // Optimistic UI: flip immediately so the user sees the state change
+        // even if the API call is slow; revert on error.
+        const previous = this.debugMode;
+        this.debugMode = !!enabled;
+        try {
+            const resp = await this._api('/api/plugins/telegram/telegram_bridge_api', {
+                action: 'set_debug',
+                enabled: !!enabled,
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                this.debugMode = previous;
+                toastFrontendError(data.error || 'Failed to toggle debug trace');
+                return;
+            }
+            this.debugMode = !!data.enabled;
+            if (data.message) toastFrontendSuccess(data.message);
+        } catch {
+            this.debugMode = previous;
+            toastFrontendError('API unavailable — debug trace not toggled');
         }
     },
 
