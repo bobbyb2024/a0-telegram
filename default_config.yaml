@@ -76,9 +76,14 @@ chat_bridge:
 reactions:
   enabled: true
   # Sent immediately when a message arrives (pre-processing acknowledgement).
+  # Fires BEFORE the concurrency semaphore so users get an instant ack even
+  # while the agent is busy with another message.
   pre_react: "👍"
-  # Sent while the agent is thinking (replaces pre_react).
-  processing_react: "🤔"
+  # Sent only when all concurrency slots are full and the message is queued.
+  # Set to empty string ("") to disable. Replaces pre_react.
+  queued_react: "🕐"
+  # Sent while the agent is actively thinking (replaces pre_react / queued_react).
+  processing_react: "🧠"
   # Sent on successful response (replaces processing_react).
   success_react: "✅"
   # Sent when the agent encounters an error.
