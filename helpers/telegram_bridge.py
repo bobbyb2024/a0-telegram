@@ -345,14 +345,18 @@ class ChatBridgeBot:
     # Auth command handling
     # ------------------------------------------------------------------
 
-    async def _handle_auth_command(self, update, context_obj) -> bool:
+    async def _handle_auth_command(self, update, context_obj, text_override: str = None) -> bool:
         """Handle !auth, !deauth, and !bridge-status commands.
 
         Returns True if the message was an auth command (consumed), False otherwise.
+
+        ``text_override`` lets slash-command handlers supply a synthetic command
+        string (e.g. "!bridge-status") without mutating the immutable PTB Message
+        object (PTB v21+ raises AttributeError on ``message.text = ...``).
         """
         message = update.message
-        text = message.text.strip()
-        user_id = str(message.from_user.id)
+        text = (text_override if text_override is not None else (message.text or "")).strip()
+        user_id = str(message.from_user.id) if message.from_user else "unknown"
         chat_id = str(message.chat_id)
 
         # --- !deauth ---
@@ -490,6 +494,17 @@ class ChatBridgeBot:
 
     async def _on_message(self, update, context_obj):
         """Handle incoming Telegram messages."""
+        try:
+            await self._on_message_inner(update, context_obj)
+        except Exception as e:
+            logger.error(
+                "_on_message unhandled error (update_id=%s): %s: %s",
+                getattr(update, "update_id", "N/A"), type(e).__name__, e, exc_info=True,
+            )
+            await self._safe_reply(update, "⚠️ An error occurred processing your message. Please try again.")
+
+    async def _on_message_inner(self, update, context_obj):
+        """Core message-handling logic — called by _on_message with error wrapping."""
         message = update.message
         if not message:
             return
@@ -546,12 +561,21 @@ class ChatBridgeBot:
         if chat_list:
             # Check both the topic key and the base chat_id
             if conv_key not in chat_list and chat_id not in chat_list:
+                logger.debug(
+                    "Message from chat %s (user %s) ignored — chat not in bridge list. "
+                    "Add it with the telegram_chat tool (action=add) or via Settings.",
+                    chat_id, user_id,
+                )
                 return
 
         # User allowlist
         config = self._get_config()
         allowed_users = config.get("chat_bridge", {}).get("allowed_users", [])
         if allowed_users and user_id not in [str(u) for u in allowed_users]:
+            logger.debug(
+                "Message from user %s in chat %s ignored — user not in allowed_users list.",
+                user_id, chat_id,
+            )
             return
 
         # Determine user text (handle voice transcription)
@@ -1024,12 +1048,22 @@ class ChatBridgeBot:
 
     async def _on_callback_query(self, update, context_obj):
         """Handle inline keyboard button taps (Track 4)."""
+        try:
+            await self._on_callback_query_inner(update, context_obj)
+        except Exception as e:
+            logger.error(
+                "_on_callback_query unhandled error (update_id=%s): %s: %s",
+                getattr(update, "update_id", "N/A"), type(e).__name__, e, exc_info=True,
+            )
+
+    async def _on_callback_query_inner(self, update, context_obj):
+        """Core callback-query logic — called with error wrapping."""
         query = update.callback_query
         if not query:
             return
 
-        user_id = str(query.from_user.id)
-        chat_id = str(query.message.chat_id)
+        user_id = str(query.from_user.id) if query.from_user else "unknown"
+        chat_id = str(query.message.chat_id) if query.message else "unknown"
         data = query.data or ""
 
         # Always answer immediately to clear the loading spinner
@@ -1138,6 +1172,16 @@ class ChatBridgeBot:
 
     async def _on_edited_message(self, update, context_obj):
         """Re-process an edited user message (Track 5)."""
+        try:
+            await self._on_edited_message_inner(update, context_obj)
+        except Exception as e:
+            logger.error(
+                "_on_edited_message unhandled error (update_id=%s): %s: %s",
+                getattr(update, "update_id", "N/A"), type(e).__name__, e, exc_info=True,
+            )
+
+    async def _on_edited_message_inner(self, update, context_obj):
+        """Core edited-message logic — called with error wrapping."""
         message = update.edited_message
         if not message or not message.text:
             return
@@ -1177,6 +1221,16 @@ class ChatBridgeBot:
 
     async def _on_forum_topic_created(self, update, context_obj):
         """Handle new forum topic creation (Track 3c)."""
+        try:
+            await self._on_forum_topic_created_inner(update, context_obj)
+        except Exception as e:
+            logger.error(
+                "_on_forum_topic_created unhandled error (update_id=%s): %s: %s",
+                getattr(update, "update_id", "N/A"), type(e).__name__, e, exc_info=True,
+            )
+
+    async def _on_forum_topic_created_inner(self, update, context_obj):
+        """Core forum-topic-created logic — called with error wrapping."""
         message = update.message
         if not message:
             return
@@ -1226,54 +1280,110 @@ class ChatBridgeBot:
 
     async def _cmd_auth(self, update, context_obj):
         """Handle /auth <key> command."""
-        text = update.message.text or ""
-        update.message.text = text.replace("/auth", "!auth", 1)
-        await self._handle_auth_command(update, context_obj)
+        try:
+            raw = (update.message.text or "") if update.message else ""
+            # Convert "/auth key" → "!auth key" without mutating the immutable
+            # PTB Message object (PTB v21 raises AttributeError on assignment).
+            text_for_handler = raw.replace("/auth", "!auth", 1).strip()
+            await self._handle_auth_command(update, context_obj, text_override=text_for_handler)
+        except Exception as e:
+            logger.error("/auth handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred processing /auth. Please try again.")
 
     async def _cmd_deauth(self, update, context_obj):
-        update.message.text = "!deauth"
-        await self._handle_auth_command(update, context_obj)
+        try:
+            await self._handle_auth_command(update, context_obj, text_override="!deauth")
+        except Exception as e:
+            logger.error("/deauth handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred processing /deauth. Please try again.")
 
     async def _cmd_status(self, update, context_obj):
-        update.message.text = "!bridge-status"
-        await self._handle_auth_command(update, context_obj)
+        try:
+            await self._handle_auth_command(update, context_obj, text_override="!bridge-status")
+        except Exception as e:
+            logger.error("/status handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred processing /status. Please try again.")
 
     async def _cmd_help(self, update, context_obj):
-        config = self._get_config()
-        elevated_enabled = config.get("chat_bridge", {}).get("allow_elevated", False)
-        user_id = str(update.message.from_user.id)
-        chat_id = str(update.message.chat_id)
-        is_elevated = self._is_elevated(user_id, chat_id)
-        mode = "Elevated (full agent access)" if is_elevated else "Restricted (chat only)"
-        elev_hint = "\n/auth &lt;key&gt; — Elevate to full Agent Zero access" if elevated_enabled and not is_elevated else ""
-        help_text = (
-            f"<b>Telegram Bridge — Available Commands</b>\n\n"
-            f"Current mode: <b>{mode}</b>\n"
-            f"{elev_hint}\n"
-            f"/deauth — End elevated session\n"
-            f"/status — Show session mode and expiry\n"
-            f"/newcontext — Clear conversation history\n"
-            f"/cancel — Cancel current in-progress task\n"
-            f"/help — Show this message"
-        )
-        await update.message.reply_text(help_text, parse_mode="HTML")
+        try:
+            config = self._get_config()
+            elevated_enabled = config.get("chat_bridge", {}).get("allow_elevated", False)
+            user_id = str(update.message.from_user.id) if update.message and update.message.from_user else "unknown"
+            chat_id = str(update.message.chat_id) if update.message else "unknown"
+            is_elevated = self._is_elevated(user_id, chat_id)
+            mode = "Elevated (full agent access)" if is_elevated else "Restricted (chat only)"
+            elev_hint = "\n/auth &lt;key&gt; — Elevate to full Agent Zero access" if elevated_enabled and not is_elevated else ""
+            help_text = (
+                f"<b>Telegram Bridge — Available Commands</b>\n\n"
+                f"Current mode: <b>{mode}</b>\n"
+                f"{elev_hint}\n"
+                f"/deauth — End elevated session\n"
+                f"/status — Show session mode and expiry\n"
+                f"/newcontext — Clear conversation history\n"
+                f"/cancel — Cancel current in-progress task\n"
+                f"/help — Show this message"
+            )
+            await update.message.reply_text(help_text, parse_mode="HTML")
+        except Exception as e:
+            logger.error("/help handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred processing /help. Please try again.")
 
     async def _cmd_newcontext(self, update, context_obj):
-        chat_id = str(update.message.chat_id)
-        thread_id = getattr(update.message, "message_thread_id", None)
-        key = _topic_key(chat_id, thread_id)
-        self._conversations.pop(key, None)
-        from usr.plugins.telegram.helpers.conversation_store import clear_history
-        clear_history(key)
-        set_context_id(key, "")
-        await update.message.reply_text("🔄 Conversation reset. Starting fresh.")
+        try:
+            chat_id = str(update.message.chat_id)
+            thread_id = getattr(update.message, "message_thread_id", None)
+            key = _topic_key(chat_id, thread_id)
+            self._conversations.pop(key, None)
+            from usr.plugins.telegram.helpers.conversation_store import clear_history
+            clear_history(key)
+            set_context_id(key, "")
+            await update.message.reply_text("🔄 Conversation reset. Starting fresh.")
+        except Exception as e:
+            logger.error("/newcontext handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred resetting context. Please try again.")
 
     async def _cmd_cancel(self, update, context_obj):
-        chat_id = str(update.message.chat_id)
-        thread_id = getattr(update.message, "message_thread_id", None)
-        key = _topic_key(chat_id, thread_id)
-        self._cancel_requested[key] = True
-        await update.message.reply_text("⚠️ Cancel requested. Current task will stop at the next checkpoint.")
+        try:
+            chat_id = str(update.message.chat_id)
+            thread_id = getattr(update.message, "message_thread_id", None)
+            key = _topic_key(chat_id, thread_id)
+            self._cancel_requested[key] = True
+            await update.message.reply_text("⚠️ Cancel requested. Current task will stop at the next checkpoint.")
+        except Exception as e:
+            logger.error("/cancel handler error: %s: %s", type(e).__name__, e, exc_info=True)
+            await self._safe_reply(update, "⚠️ An error occurred processing /cancel.")
+
+    async def _safe_reply(self, update, text: str):
+        """Best-effort reply to a message; swallows all exceptions."""
+        try:
+            if update and update.message:
+                await update.message.reply_text(text)
+        except Exception as _e:
+            logger.debug("_safe_reply failed: %s", _e)
+
+    async def _error_handler(self, update, context_obj):
+        """PTB application-level error handler.
+
+        Registered via app.add_error_handler() so *every* unhandled exception
+        in any handler is logged here instead of being silently swallowed or
+        producing PTB's generic "No error handlers are registered" warning.
+        """
+        err = context_obj.error
+        update_id = getattr(update, "update_id", "N/A") if update else "N/A"
+        logger.error(
+            "Unhandled exception in PTB handler (update_id=%s): %s: %s",
+            update_id, type(err).__name__, err, exc_info=err,
+        )
+        # Best-effort user notification — don't let this raise
+        try:
+            chat = getattr(update, "effective_chat", None) if update else None
+            if chat:
+                await context_obj.bot.send_message(
+                    chat_id=chat.id,
+                    text="⚠️ An internal error occurred. Please try again.",
+                )
+        except Exception as _notify_err:
+            logger.debug("Could not notify user of handler error: %s", _notify_err)
 
 
 def _split_message(content: str, max_length: int = 4096) -> list[str]:
@@ -1371,6 +1481,11 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
         app.add_handler(CommandHandler("help",       bot._cmd_help))
         app.add_handler(CommandHandler("newcontext", bot._cmd_newcontext))
         app.add_handler(CommandHandler("cancel",     bot._cmd_cancel))
+
+        # Global error handler — catches all unhandled exceptions in any
+        # handler and logs them with full context instead of PTB's default
+        # "No error handlers are registered" warning.
+        app.add_error_handler(bot._error_handler)
 
         bot._running = True
 
