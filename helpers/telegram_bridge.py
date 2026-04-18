@@ -186,7 +186,7 @@ def touch_topic(topic_key: str):
 
 # Bot commands list (registered with Telegram on startup)
 BRIDGE_COMMANDS = [
-    {"command": "auth",       "description": "Elevate to full Agent Zero access (/auth <key>)"},
+    {"command": "auth",       "description": "Elevate to full Agent Zero access. Usage: /auth key"},
     {"command": "deauth",     "description": "End elevated session"},
     {"command": "status",     "description": "Show current session mode"},
     {"command": "help",       "description": "List available commands"},
@@ -1374,17 +1374,19 @@ def _run_bot_in_thread(bot: ChatBridgeBot, ready_event: threading.Event):
             logger.info(f"Chat bridge connected as @{me.username} (ID: {me.id})")
 
             # Register bot commands with Telegram.
-            # PTB v21 requires BotCommand objects, not plain dicts.
+            # PTB v21 accepts (command, description) tuples directly.
+            # Note: Telegram rejects descriptions containing < or > — keep
+            # descriptions to plain ASCII with no HTML-like characters.
             try:
-                from telegram import BotCommand as _BotCommand
-                ptb_commands = [
-                    _BotCommand(command=c["command"], description=c["description"])
-                    for c in BRIDGE_COMMANDS
-                ]
-                await app.bot.set_my_commands(ptb_commands)
-                logger.info("Registered %d bot commands", len(ptb_commands))
+                await app.bot.set_my_commands(
+                    [(c["command"], c["description"]) for c in BRIDGE_COMMANDS]
+                )
+                logger.info("Registered %d bot commands", len(BRIDGE_COMMANDS))
             except Exception as e:
-                logger.warning(f"Could not register bot commands: {e}")
+                logger.warning(
+                    "Could not register bot commands: %s: %s",
+                    type(e).__name__, e, exc_info=True,
+                )
 
             # Drop any active webhook or lingering getUpdates session from a
             # previous run.  This is the standard fix for the
